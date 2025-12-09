@@ -1,0 +1,8 @@
+[Unit] 
+Description=dota qqbot
+[Service]
+EnvironmentFile=/root/.secrets
+ExecStart=/usr/bin/bash /root/workspace/DotaStatistics/startup.sh
+Restart=on-failure
+[Install] 
+WantedBy=multi-user.target
