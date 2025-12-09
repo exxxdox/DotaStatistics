@@ -1,6 +1,7 @@
 ## 运行
 
 `init.sh` 初始化环境并配置systemd
+
 `startup.sh` 运行
 
 ## 配置
