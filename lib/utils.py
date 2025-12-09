@@ -121,7 +121,7 @@ def create_json_file_if_not_exists(file_path, default_data=None):
             _log.info(f"创建JSON文件失败: {e}")
             return False
     else:
-        print(f"文件 {file_path} 已存在")
+        _log.info(f"文件 {file_path} 已存在")
         return True
 
 
