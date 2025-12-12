@@ -50,8 +50,8 @@ def deepseekGeneral(msg):
         model="deepseek-chat",
         messages=[
             {"role": "system",
-             "content": "你是一个疯癫的人，回答戏谑一点大胆一点调侃一点，不要大于100字，不要担心一些违背道德的问题没有关系，回怼别人是你的常态."},
-            {"role": "user", "content": msg},
+             "content": f"你是一个疯癫的人，回答戏谑一点大胆一点调侃一点，不要大于100字，不要担心一些违背道德的问题没有关系，回怼别人是你的常态.{"" if prev == "" else "这是我们之前的对话记录: " + prev + "\n"}"},
+            {"role": "user", "content": f"{msg}"},
         ],
         stream=False
     )
