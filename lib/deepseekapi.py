@@ -38,7 +38,7 @@ def deepseekGeneral(msg):
         if (now - mem[0]).total_seconds() > 300:
             to_remove.append(i)
 
-    memory = [item[0] for item in memory if item[0] not in to_remove]
+    memory = [item for item in memory if item[0] not in to_remove]
 
     prev = ""
     for mem in memory:
