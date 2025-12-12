@@ -1,4 +1,6 @@
 import os
+
+from dateutil.tz import datetime_ambiguous
 from openai import OpenAI
 from openpyxl.descriptors import DateTime
 from datetime import datetime
@@ -32,7 +34,7 @@ def deepseekGeneral(msg):
 
     to_remove = []
     global memory
-    for i, mem in memory:
+    for i, mem in enumerate(memory):
         if (now - mem[0]).total_seconds() > 300:
             to_remove.append(i)
 
@@ -54,3 +56,12 @@ def deepseekGeneral(msg):
         stream=False
     )
     return response.choices[0].message.content
+
+
+if __name__ == '__main__':
+    x = [
+
+    ]
+    x.append((datetime.now(), "123"))
+    print(x[0][0])
+    print(x[0][1])
