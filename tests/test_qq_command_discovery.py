@@ -94,3 +94,17 @@ def test_configure_accepts_json_string_returned_by_qq_botpy() -> None:
         ("GET", "/v2/panels"),
         ("POST", "/v2/panels"),
     ]
+
+
+def test_configure_accepts_wrapped_empty_panel_response() -> None:
+    calls: list[tuple[str, str]] = []
+
+    async def request(route, **_kwargs):
+        calls.append((route.method, route.path))
+        if route.method == "GET":
+            return {"code": 0, "data": {"is_end": True, "next_cursor": ""}}
+        return {}
+
+    asyncio.run(QQCommandDiscoveryService(request).configure())
+
+    assert calls[-1] == ("POST", "/v2/panels")

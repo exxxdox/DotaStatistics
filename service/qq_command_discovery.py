@@ -103,25 +103,13 @@ class QQCommandDiscoveryService:
         response = await self._request(
             Route("GET", "/v2/panels"), params={"scope": "group", "limit": 50}
         )
-        if isinstance(response, str):
-            try:
-                # qq-botpy 对带 charset 的 JSON 响应可能返回原始字符串。
-                response = json.loads(response)
-            except json.JSONDecodeError as error:
-                raise RuntimeError("QQ 指令面板列表返回了无效 JSON") from error
-        if not isinstance(response, dict) or not isinstance(
-            response.get("records"), list
-        ):
-            # 查询失败时禁止盲目创建，避免每次重启产生重复面板。
-            raise RuntimeError(
-                f"QQ 指令面板列表响应格式错误: {type(response).__name__}"
-            )
+        records = self._extract_panel_records(response)
 
         panel = build_group_panel()
         existing = next(
             (
                 record
-                for record in response["records"]
+                for record in records
                 if isinstance(record, dict)
                 and isinstance(record.get("panel"), dict)
                 and record["panel"].get("remark") == GROUP_PANEL_REMARK
@@ -139,3 +127,43 @@ class QQCommandDiscoveryService:
             Route("POST", "/v2/panels"),
             json={"scope": "group", "target_type": "all", "panel": panel},
         )
+
+    @staticmethod
+    def _extract_panel_records(response: Any) -> list[dict[str, Any]]:
+        """兼容 qq-botpy 原始 JSON、data 包装和空列表字段省略。"""
+        if isinstance(response, str):
+            try:
+                # qq-botpy 对带 charset 的 JSON 响应可能返回原始字符串。
+                response = json.loads(response)
+            except json.JSONDecodeError as error:
+                raise RuntimeError("QQ 指令面板列表返回了无效 JSON") from error
+
+        if not isinstance(response, dict):
+            raise RuntimeError(
+                f"QQ 指令面板列表响应格式错误: {type(response).__name__}"
+            )
+
+        code = response.get("code")
+        if code not in (None, 0, "0"):
+            # 只记录错误码，避免把服务端返回内容或标识符带入异常日志。
+            raise RuntimeError(f"QQ 指令面板接口业务错误: code={code}")
+
+        payload = response.get("data", response)
+        if not isinstance(payload, dict):
+            raise RuntimeError(
+                f"QQ 指令面板 data 响应格式错误: {type(payload).__name__}"
+            )
+
+        records = payload.get("records")
+        if records is None and (
+            not payload or "is_end" in payload or "next_cursor" in payload
+        ):
+            # 实际接口在首次查询且没有面板时可能省略空 records 字段。
+            return []
+        if not isinstance(records, list):
+            keys = ",".join(sorted(str(key) for key in payload))
+            raise RuntimeError(
+                "QQ 指令面板列表响应格式错误: "
+                f"records={type(records).__name__}, keys={keys}"
+            )
+        return records
