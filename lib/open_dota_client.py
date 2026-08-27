@@ -1,10 +1,12 @@
 import json
 import logging
 import os
+import threading
 import time
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -12,11 +14,15 @@ import requests
 
 _log = logging.getLogger(__name__)
 DEFAULT_HERO_STATS_CACHE_PATH = (
-    Path(__file__).resolve().parent.parent / "res" / "monthly_hero_stats_cache.json"
+    Path(__file__).resolve().parent.parent / "res" / "daily_hero_stats_cache.json"
 )
 RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504, 522, 524}
-SECONDS_PER_WEEK = 7 * 24 * 60 * 60
-RETAINED_EPOCH_WEEKS = 4
+STAT_PERIOD_DAYS = 30
+CACHE_SCHEMA_VERSION = 2
+
+
+def _utc_now() -> datetime:
+    return datetime.now(tz=timezone.utc)
 
 
 class OpenDotaApiError(RuntimeError):
@@ -49,7 +55,9 @@ class OpenDotaApiClient:
         retry_backoff: float = 1.0,
         cache_path: Path | None = DEFAULT_HERO_STATS_CACHE_PATH,
         max_cache_age_seconds: int = 48 * 60 * 60,
+        refresh_workers: int = 4,
         sleep: Callable[[float], None] = time.sleep,
+        now: Callable[[], datetime] = _utc_now,
     ) -> None:
         self.timeout = timeout
         self.session = session or requests.Session()
@@ -58,7 +66,10 @@ class OpenDotaApiClient:
         self.retry_backoff = retry_backoff
         self.cache_path = cache_path
         self.max_cache_age_seconds = max_cache_age_seconds
+        self.refresh_workers = refresh_workers
         self._sleep = sleep
+        self._now = now
+        self._cache_lock = threading.Lock()
         self.used_cached_hero_stats = False
         self.stats_period_start: date | None = None
         self.stats_period_end: date | None = None
@@ -87,27 +98,13 @@ class OpenDotaApiClient:
     ) -> list[HeroWinRateStat]:
         if top_count < 1 or min_games < 1:
             raise ValueError("top_count 和 min_games 必须大于 0")
+        if self.refresh_workers < 1:
+            raise ValueError("refresh_workers 必须大于 0")
 
-        self.used_cached_hero_stats = False
-        self._set_current_stats_period()
-        try:
-            # Explorer 的只读账号无权访问 scenarios；必须使用官方场景接口，
-            # 再在本地跨位置和比赛时长桶汇总。
-            payload = self._get("/scenarios/laneRoles")
-        except OpenDotaApiError:
-            payload = self._load_cached_hero_stats()
-            if payload is None:
-                raise
-            self.used_cached_hero_stats = True
-            _log.warning("OpenDota 月度英雄统计不可用，使用最近一次成功缓存")
-
-        if not isinstance(payload, list):
-            raise OpenDotaApiError("OpenDota 月度英雄统计返回格式错误")
-
-        stats = self._aggregate_monthly_stats(payload)
-        if not self.used_cached_hero_stats:
-            # 只有完整解析成功的数据才有资格替换最后成功缓存。
-            self._save_hero_stats_cache(payload)
+        # 同一个机器人实例可能同时收到手动命令和定时任务；串行刷新可避免
+        # 两批日查询重复消耗配额或互相覆盖缓存文件。
+        with self._cache_lock:
+            stats = self._load_or_refresh_monthly_stats()
         eligible = [stat for stat in stats if stat.games >= min_games]
         eligible.sort(key=lambda stat: (-stat.win_rate, -stat.games, stat.hero_id))
         return eligible[:top_count]
@@ -117,16 +114,132 @@ class OpenDotaApiClient:
         top_count: int = 10,
         min_games: int = 100,
     ) -> list[HeroWinRateStat]:
-        """兼容旧调用名称，统计口径已调整为 OpenDota 最近四个统计周。"""
+        """兼容旧调用名称，统计口径已调整为最近 30 个完整自然日。"""
         return self.get_recent_month_win_rate_leaders(top_count, min_games)
 
+    def _load_or_refresh_monthly_stats(self) -> list[HeroWinRateStat]:
+        self.used_cached_hero_stats = False
+        self._set_current_stats_period()
+        document = self._load_cache_document()
+        days = document["days"]
+        target_dates = self._target_dates()
+        missing_dates = [day for day in target_dates if day.isoformat() not in days]
+
+        updates, refresh_error = self._fetch_missing_days(missing_dates)
+        days.update(updates)
+        # 只保留当前窗口，避免缓存文件无限增长。
+        document["days"] = {
+            day.isoformat(): days[day.isoformat()]
+            for day in target_dates
+            if day.isoformat() in days
+        }
+
+        if refresh_error is not None:
+            # 已成功的日切片也立即落盘，下次只补剩余日期。
+            self._save_cache_document(document)
+            snapshot = self._load_recent_snapshot(document)
+            if snapshot is None:
+                raise refresh_error
+            self.used_cached_hero_stats = True
+            _log.warning("OpenDota 日统计刷新不完整，使用最近一次成功月度快照")
+            return self._aggregate_monthly_stats(snapshot)
+
+        missing_after_refresh = [
+            day for day in target_dates if day.isoformat() not in document["days"]
+        ]
+        if missing_after_refresh:
+            raise OpenDotaApiError("最近 30 天英雄日统计缓存不完整")
+
+        rows = [
+            row
+            for day in target_dates
+            for row in document["days"][day.isoformat()]
+        ]
+        stats = self._aggregate_monthly_stats(rows)
+        snapshot_rows = [
+            {"hero_id": stat.hero_id, "games": stat.games, "wins": stat.wins}
+            for stat in stats
+        ]
+        document["snapshot"] = {
+            "cached_at": self._now().timestamp(),
+            "period_start": self.stats_period_start.isoformat(),
+            "period_end": self.stats_period_end.isoformat(),
+            "data": snapshot_rows,
+        }
+        self._save_cache_document(document)
+        return stats
+
     def _set_current_stats_period(self) -> None:
-        current_week = int(time.time() // SECONDS_PER_WEEK)
-        start_timestamp = (current_week - RETAINED_EPOCH_WEEKS + 1) * SECONDS_PER_WEEK
-        self.stats_period_start = datetime.fromtimestamp(
-            start_timestamp, tz=timezone.utc
-        ).date()
-        self.stats_period_end = datetime.now(tz=timezone.utc).date()
+        # 排除尚未结束的 UTC 当天，保证每个日切片不会在一天内反复变化。
+        self.stats_period_end = self._now().date() - timedelta(days=1)
+        self.stats_period_start = self.stats_period_end - timedelta(
+            days=STAT_PERIOD_DAYS - 1
+        )
+
+    def _target_dates(self) -> list[date]:
+        if self.stats_period_start is None:
+            raise AssertionError("统计周期尚未初始化")
+        return [
+            self.stats_period_start + timedelta(days=offset)
+            for offset in range(STAT_PERIOD_DAYS)
+        ]
+
+    def _fetch_missing_days(
+        self, missing_dates: list[date]
+    ) -> tuple[dict[str, list[dict[str, Any]]], OpenDotaApiError | None]:
+        if not missing_dates:
+            return {}, None
+
+        updates: dict[str, list[dict[str, Any]]] = {}
+        first_error: OpenDotaApiError | None = None
+        worker_count = min(self.refresh_workers, len(missing_dates))
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            futures = {
+                executor.submit(self._fetch_daily_stats, day): day
+                for day in missing_dates
+            }
+            for future in as_completed(futures):
+                day = futures[future]
+                try:
+                    rows = future.result()
+                    # 保存前先完整校验，禁止坏数据污染增量缓存。
+                    self._aggregate_monthly_stats(rows)
+                    updates[day.isoformat()] = rows
+                except OpenDotaApiError as error:
+                    first_error = first_error or error
+        return updates, first_error
+
+    def _fetch_daily_stats(self, target_date: date) -> list[dict[str, Any]]:
+        start = datetime(
+            target_date.year,
+            target_date.month,
+            target_date.day,
+            tzinfo=timezone.utc,
+        )
+        start_timestamp = int(start.timestamp())
+        end_timestamp = int((start + timedelta(days=1)).timestamp())
+        sql = f"""
+WITH daily AS (
+    SELECT picked.hero_id, picked.won
+    FROM public_matches AS match
+    CROSS JOIN LATERAL (
+        SELECT radiant.hero_id, match.radiant_win AS won
+        FROM unnest(match.radiant_team) AS radiant(hero_id)
+        UNION ALL
+        SELECT dire.hero_id, NOT match.radiant_win AS won
+        FROM unnest(match.dire_team) AS dire(hero_id)
+    ) AS picked
+    WHERE match.start_time >= {start_timestamp}
+      AND match.start_time < {end_timestamp}
+)
+SELECT
+    hero_id,
+    COUNT(*)::bigint AS games,
+    SUM(CASE WHEN won THEN 1 ELSE 0 END)::bigint AS wins
+FROM daily
+GROUP BY hero_id
+""".strip()
+        return self.explorer(sql)
 
     def _get(self, path: str, params: dict[str, Any] | None = None) -> Any:
         for attempt in range(self.max_retries + 1):
@@ -172,42 +285,52 @@ class OpenDotaApiClient:
         except (AttributeError, TypeError, ValueError):
             return ""
 
-    def _save_hero_stats_cache(self, payload: list[dict[str, Any]]) -> None:
+    def _save_cache_document(self, document: dict[str, Any]) -> None:
         if self.cache_path is None:
             return
         temporary_path = self.cache_path.with_suffix(".json.tmp")
         try:
             self.cache_path.parent.mkdir(parents=True, exist_ok=True)
             temporary_path.write_text(
-                json.dumps(
-                    {
-                        "cached_at": time.time(),
-                        "period_start": self.stats_period_start.isoformat(),
-                        "period_end": self.stats_period_end.isoformat(),
-                        "data": payload,
-                    },
-                    ensure_ascii=False,
-                ),
+                json.dumps(document, ensure_ascii=False),
                 encoding="utf-8",
             )
             # 同一文件系统原子替换，避免服务中断留下半份 JSON。
             temporary_path.replace(self.cache_path)
         except OSError:
-            _log.exception("写入 OpenDota heroStats 缓存失败")
+            _log.exception("写入 OpenDota 英雄日统计缓存失败")
 
-    def _load_cached_hero_stats(self) -> list[dict[str, Any]] | None:
+    def _load_cache_document(self) -> dict[str, Any]:
         if self.cache_path is None:
-            return None
+            return {"version": CACHE_SCHEMA_VERSION, "days": {}, "snapshot": None}
         try:
             cached = json.loads(self.cache_path.read_text(encoding="utf-8"))
-            cached_at = float(cached["cached_at"])
-            payload = cached["data"]
-            if time.time() - cached_at > self.max_cache_age_seconds:
+            if (
+                not isinstance(cached, dict)
+                or cached.get("version") != CACHE_SCHEMA_VERSION
+                or not isinstance(cached.get("days"), dict)
+            ):
+                raise ValueError("缓存版本或结构不匹配")
+            return cached
+        except (OSError, TypeError, ValueError):
+            # 旧版月度快照口径不同，不能混入新的逐日 public_matches 数据。
+            return {"version": CACHE_SCHEMA_VERSION, "days": {}, "snapshot": None}
+
+    def _load_recent_snapshot(
+        self, document: dict[str, Any]
+    ) -> list[dict[str, Any]] | None:
+        try:
+            snapshot = document["snapshot"]
+            cached_at = float(snapshot["cached_at"])
+            if self._now().timestamp() - cached_at > self.max_cache_age_seconds:
                 return None
-            self.stats_period_start = date.fromisoformat(cached["period_start"])
-            self.stats_period_end = date.fromisoformat(cached["period_end"])
-            return payload if isinstance(payload, list) else None
-        except (OSError, KeyError, TypeError, ValueError):
+            payload = snapshot["data"]
+            if not isinstance(payload, list):
+                return None
+            self.stats_period_start = date.fromisoformat(snapshot["period_start"])
+            self.stats_period_end = date.fromisoformat(snapshot["period_end"])
+            return payload
+        except (KeyError, TypeError, ValueError):
             return None
 
     @staticmethod

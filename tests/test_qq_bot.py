@@ -41,6 +41,17 @@ def test_known_commands_are_dispatched() -> None:
     assert router.dispatch("简报") == "今日简报"
 
 
+def test_command_panel_slash_prefix_is_ignored() -> None:
+    router = build_router()
+
+    assert router.dispatch("/撒情况 小明") == "比赛:123"
+    assert router.dispatch("／今儿 小明") == "胜:2, 败:1"
+    assert router.dispatch(" /简报 ") == "今日简报"
+    assert router.dispatch(
+        "/群OpenID", CommandContext(group_openid="group-openid")
+    ) == "当前群 OpenID：group-openid"
+
+
 def test_command_errors_do_not_fall_through_to_ai() -> None:
     router = build_router()
 
@@ -152,6 +163,50 @@ def test_manual_report_uses_scheduled_target_and_sender() -> None:
             "content": "测试榜单正文",
         }
     ]
+    assert message.replies[0]["content"] == "测试榜单已发送到定时任务目标群。"
+
+
+def test_slash_prefixed_manual_report_uses_scheduled_sender() -> None:
+    class FakeWeeklyReport:
+        def build(self) -> str:
+            return "测试榜单正文"
+
+    class FakeApi:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, object]] = []
+
+        async def post_group_message(self, **kwargs):
+            self.calls.append(kwargs)
+            return SimpleNamespace(id="sent-message-id")
+
+    class FakeMessage:
+        content = "/测试胜率榜"
+        group_openid = "command-source-group"
+
+        def __init__(self) -> None:
+            self.replies: list[dict[str, object]] = []
+
+        async def reply(self, **kwargs):
+            self.replies.append(kwargs)
+            return SimpleNamespace(id="reply-message-id")
+
+    async def run_manual_test() -> tuple[FakeApi, FakeMessage]:
+        client = MyClient(
+            intents=botpy.Intents(public_messages=True),
+            router=build_router(),
+            report_group_openid="scheduled-target-group",
+            hero_win_rate_report=FakeWeeklyReport(),
+            ext_handlers=False,
+        )
+        fake_api = FakeApi()
+        client.api = fake_api
+        message = FakeMessage()
+        await client.on_group_at_message_create(message)
+        return fake_api, message
+
+    fake_api, message = asyncio.run(run_manual_test())
+
+    assert fake_api.calls[0]["group_openid"] == "scheduled-target-group"
     assert message.replies[0]["content"] == "测试榜单已发送到定时任务目标群。"
 
 

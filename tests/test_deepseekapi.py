@@ -24,6 +24,23 @@ def test_dota_analysis_uses_flash_thinking_mode(monkeypatch) -> None:
     assert arguments["extra_body"] == {"thinking": {"type": "enabled"}}
 
 
+def test_hero_recommendations_use_stats_and_flash_thinking(monkeypatch) -> None:
+    client = build_client("1号位：敌法师")
+    monkeypatch.setattr(deepseekapi, "get_client", lambda: client)
+
+    assert deepseekapi.deepseekHeroRecommendations("英雄候选数据") == "1号位：敌法师"
+
+    arguments = client.chat.completions.create.call_args.kwargs
+    assert arguments["model"] == "deepseek-v4-flash"
+    assert arguments["reasoning_effort"] == "high"
+    assert arguments["extra_body"] == {"thinking": {"type": "enabled"}}
+    assert "1至5号位" in arguments["messages"][0]["content"]
+    assert arguments["messages"][1] == {
+        "role": "user",
+        "content": "英雄候选数据",
+    }
+
+
 def test_general_chat_uses_flash_without_thinking(monkeypatch) -> None:
     client = build_client()
     monkeypatch.setattr(deepseekapi, "get_client", lambda: client)

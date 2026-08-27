@@ -1,3 +1,4 @@
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -5,60 +6,6 @@ import pytest
 import requests
 
 from lib.open_dota_client import OpenDotaApiClient, OpenDotaApiError
-
-
-class StubOpenDotaClient(OpenDotaApiClient):
-    def __init__(self, rows: list[dict[str, Any]]) -> None:
-        self.rows = rows
-        self.last_path = ""
-        self.cache_path = None
-        self.used_cached_hero_stats = False
-
-    def _get(self, path: str, params=None):
-        self.last_path = path
-        return self.rows
-
-
-def test_monthly_leaders_aggregate_all_lane_roles_and_duration_buckets() -> None:
-    client = StubOpenDotaClient(
-        [
-            {
-                "hero_id": "1",
-                "lane_role": 1,
-                "time": 1800,
-                "games": "80",
-                "wins": "48",
-            },
-            {
-                "hero_id": "1",
-                "lane_role": 2,
-                "time": 2700,
-                "games": "120",
-                "wins": "72",
-            },
-        ]
-    )
-
-    stats = client.get_recent_month_win_rate_leaders(top_count=10, min_games=100)
-
-    assert stats[0].win_rate == 0.6
-    assert stats[0].games == 200
-    assert stats[0].wins == 120
-    assert client.last_path == "/scenarios/laneRoles"
-    assert client.stats_period_start is not None
-    assert client.stats_period_end is not None
-    period_days = (client.stats_period_end - client.stats_period_start).days
-    assert 21 <= period_days <= 27
-
-
-def test_all_rank_leaders_reject_invalid_limits() -> None:
-    with pytest.raises(ValueError):
-        StubOpenDotaClient([]).get_recent_month_win_rate_leaders(top_count=0)
-
-
-def test_all_rank_leaders_reject_invalid_rows() -> None:
-    with pytest.raises(OpenDotaApiError):
-        StubOpenDotaClient([{"hero_id": "bad"}]).get_recent_month_win_rate_leaders()
 
 
 class FakeResponse:
@@ -87,6 +34,118 @@ class FakeSession:
         response = self.responses[self.calls]
         self.calls += 1
         return response
+
+
+def test_daily_query_uses_exact_utc_day_boundaries() -> None:
+    client = OpenDotaApiClient(cache_path=None)
+    captured_sql = ""
+
+    def explorer(sql: str) -> list[dict[str, Any]]:
+        nonlocal captured_sql
+        captured_sql = sql
+        return [{"hero_id": 1, "games": "10", "wins": "6"}]
+
+    client.explorer = explorer  # type: ignore[method-assign]
+    rows = client._fetch_daily_stats(date(2026, 8, 1))
+
+    start = int(datetime(2026, 8, 1, tzinfo=timezone.utc).timestamp())
+    end = int(datetime(2026, 8, 2, tzinfo=timezone.utc).timestamp())
+    assert rows[0]["games"] == "10"
+    assert f"match.start_time >= {start}" in captured_sql
+    assert f"match.start_time < {end}" in captured_sql
+    assert "unnest(match.radiant_team)" in captured_sql
+    assert "unnest(match.dire_team)" in captured_sql
+
+
+def test_monthly_stats_backfill_once_then_reuse_daily_cache() -> None:
+    fixed_now = datetime(2026, 8, 27, 12, tzinfo=timezone.utc)
+    cache_path = Path(__file__).parent / ".daily_hero_stats_cache_test.json"
+    calls: list[date] = []
+
+    def fetch(day: date) -> list[dict[str, Any]]:
+        calls.append(day)
+        return [
+            {"hero_id": 1, "games": 10, "wins": 6},
+            {"hero_id": 2, "games": 20, "wins": 10},
+        ]
+
+    try:
+        client = OpenDotaApiClient(
+            cache_path=cache_path,
+            refresh_workers=1,
+            now=lambda: fixed_now,
+        )
+        client._fetch_daily_stats = fetch  # type: ignore[method-assign]
+        stats = client.get_recent_month_win_rate_leaders(top_count=10, min_games=1)
+
+        assert len(calls) == 30
+        assert calls[0] == date(2026, 7, 28)
+        assert calls[-1] == date(2026, 8, 26)
+        hero_one = next(stat for stat in stats if stat.hero_id == 1)
+        assert (hero_one.games, hero_one.wins, hero_one.win_rate) == (300, 180, 0.6)
+        assert client.stats_period_start == date(2026, 7, 28)
+        assert client.stats_period_end == date(2026, 8, 26)
+
+        cached_client = OpenDotaApiClient(
+            cache_path=cache_path,
+            refresh_workers=1,
+            now=lambda: fixed_now,
+        )
+        cached_client._fetch_daily_stats = (  # type: ignore[method-assign]
+            lambda _day: pytest.fail("已有完整日缓存时不应请求 OpenDota")
+        )
+        cached_stats = cached_client.get_recent_month_win_rate_leaders(
+            top_count=10, min_games=1
+        )
+
+        assert next(stat for stat in cached_stats if stat.hero_id == 1).games == 300
+    finally:
+        cache_path.unlink(missing_ok=True)
+        cache_path.with_suffix(".json.tmp").unlink(missing_ok=True)
+
+
+def test_refresh_failure_uses_recent_complete_snapshot() -> None:
+    first_now = datetime(2026, 8, 27, 12, tzinfo=timezone.utc)
+    cache_path = Path(__file__).parent / ".daily_snapshot_cache_test.json"
+    try:
+        client = OpenDotaApiClient(
+            cache_path=cache_path,
+            refresh_workers=1,
+            now=lambda: first_now,
+        )
+        client._fetch_daily_stats = (  # type: ignore[method-assign]
+            lambda _day: [{"hero_id": 1, "games": 10, "wins": 6}]
+        )
+        client.get_recent_month_win_rate_leaders(top_count=10, min_games=1)
+
+        cached_client = OpenDotaApiClient(
+            cache_path=cache_path,
+            refresh_workers=1,
+            now=lambda: first_now + timedelta(days=1),
+        )
+
+        def fail(_day: date) -> list[dict[str, Any]]:
+            raise OpenDotaApiError("OpenDota 暂不可用")
+
+        cached_client._fetch_daily_stats = fail  # type: ignore[method-assign]
+        stats = cached_client.get_recent_month_win_rate_leaders(
+            top_count=10, min_games=1
+        )
+
+        assert stats[0].games == 300
+        assert cached_client.used_cached_hero_stats is True
+        assert cached_client.stats_period_end == date(2026, 8, 26)
+    finally:
+        cache_path.unlink(missing_ok=True)
+        cache_path.with_suffix(".json.tmp").unlink(missing_ok=True)
+
+
+def test_monthly_stats_reject_invalid_limits_and_rows() -> None:
+    client = OpenDotaApiClient(cache_path=None)
+    with pytest.raises(ValueError):
+        client.get_recent_month_win_rate_leaders(top_count=0)
+    with pytest.raises(OpenDotaApiError):
+        client._aggregate_monthly_stats([{"hero_id": 1, "games": 5, "wins": 6}])
 
 
 def test_get_retries_522_before_succeeding() -> None:
@@ -121,35 +180,3 @@ def test_get_reports_sanitized_api_error_without_full_url() -> None:
         "OpenDota 请求失败: HTTP 400, path=/explorer, detail=bad query"
     )
     assert "SELECT secret" not in str(captured.value)
-
-
-def test_hero_stats_falls_back_to_recent_cache() -> None:
-    payload = [
-        {
-            "hero_id": 1,
-            "games": 200,
-            "wins": 120,
-        }
-    ]
-    cache_path = Path(__file__).parent / ".hero_stats_cache_test.json"
-    try:
-        live_client = OpenDotaApiClient(
-            session=FakeSession([FakeResponse(200, payload)]),
-            max_retries=0,
-            cache_path=cache_path,
-        )
-        live_client.get_recent_month_win_rate_leaders()
-
-        cached_client = OpenDotaApiClient(
-            session=FakeSession([FakeResponse(522)]),
-            max_retries=0,
-            cache_path=cache_path,
-        )
-        stats = cached_client.get_recent_month_win_rate_leaders()
-
-        assert stats[0].hero_name == "英雄 1"
-        assert cached_client.used_cached_hero_stats is True
-    finally:
-        # 测试缓存是精确命名的临时产物，结束时不留在工作区。
-        cache_path.unlink(missing_ok=True)
-        cache_path.with_suffix(".json.tmp").unlink(missing_ok=True)

@@ -20,6 +20,15 @@ CommandHandler = Callable[[list[str]], str]
 PRIVATE_HERO_REPORT_COMMAND = "高胜率英雄"
 
 
+def normalize_command_content(content: str) -> str:
+    """移除 QQ 指令面板自动添加的斜杠前缀。"""
+    normalized = content.strip()
+    if normalized.startswith(("/", "／")):
+        # 同时兼容 QQ 面板的半角斜杠和部分输入法产生的全角斜杠。
+        return normalized[1:].lstrip()
+    return normalized
+
+
 @dataclass(frozen=True)
 class CommandContext:
     """保存依赖当前 QQ 消息事件的命令参数。"""
@@ -58,7 +67,8 @@ class CommandRouter:
         }
 
     def dispatch(self, content: str, context: CommandContext | None = None) -> str:
-        words = content.split()
+        normalized_content = normalize_command_content(content)
+        words = normalized_content.split()
         _log.info(f"收到指令: {words}")
         if not words:
             return self._help()
@@ -222,7 +232,8 @@ class MyClient(botpy.Client):
 
     async def on_group_at_message_create(self, message: GroupMessage):
         try:
-            if message.content.strip() in {"测试英雄胜率榜", "测试胜率榜"}:
+            normalized_content = normalize_command_content(message.content)
+            if normalized_content in {"测试英雄胜率榜", "测试胜率榜"}:
                 # 手动测试复用定时任务的主动发送方法和目标群，不走当前消息回复通道。
                 sent = await self._send_hero_win_rate_report()
                 reply = (
