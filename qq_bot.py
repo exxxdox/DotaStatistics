@@ -115,7 +115,8 @@ class CommandRouter:
         )
 
     def _track(self, args: list[str]) -> str:
-        if not args:
+        if not args or args == ["昵称", "dotaId"]:
+            # QQ 客户端可能短期缓存旧菜单中的占位参数；占位词不能当作真实输入。
             return "请输入昵称和 dotaId，例如：追踪术 小明 123456789"
         if len(args) != 2:
             return "用法: 追踪术 昵称 dotaId"
@@ -159,7 +160,8 @@ class CommandRouter:
     def _resolve_player(
         self, args: list[str], command: str
     ) -> tuple[str, int, str | None]:
-        if not args:
+        if not args or args == ["昵称"]:
+            # 兼容尚未刷新的旧菜单 payload，避免实际查询名为“昵称”的选手。
             return "", 0, f"请输入昵称，例如：{command} 小明"
         if len(args) != 1:
             return "", 0, f"用法: {command} 昵称"

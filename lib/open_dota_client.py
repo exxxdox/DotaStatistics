@@ -91,9 +91,9 @@ class OpenDotaApiClient:
         self.used_cached_hero_stats = False
         self._set_current_stats_period()
         try:
-            # scenarios 是 OpenDota 按周维护的预聚合表；使用其四周保留窗口可
-            # 避免大范围扫描 public_matches 导致 Explorer 的 Query read timeout。
-            payload = self.explorer(self._recent_month_sql())
+            # Explorer 的只读账号无权访问 scenarios；必须使用官方场景接口，
+            # 再在本地跨位置和比赛时长桶汇总。
+            payload = self._get("/scenarios/laneRoles")
         except OpenDotaApiError:
             payload = self._load_cached_hero_stats()
             if payload is None:
@@ -104,7 +104,7 @@ class OpenDotaApiClient:
         if not isinstance(payload, list):
             raise OpenDotaApiError("OpenDota 月度英雄统计返回格式错误")
 
-        stats = [self._parse_monthly_stat(row) for row in payload]
+        stats = self._aggregate_monthly_stats(payload)
         if not self.used_cached_hero_stats:
             # 只有完整解析成功的数据才有资格替换最后成功缓存。
             self._save_hero_stats_cache(payload)
@@ -119,29 +119,6 @@ class OpenDotaApiClient:
     ) -> list[HeroWinRateStat]:
         """兼容旧调用名称，统计口径已调整为 OpenDota 最近四个统计周。"""
         return self.get_recent_month_win_rate_leaders(top_count, min_games)
-
-    @staticmethod
-    def _recent_month_sql() -> str:
-        return """
-WITH bounds AS (
-    SELECT FLOOR(EXTRACT(EPOCH FROM NOW()) / 604800)::int AS current_week
-), monthly AS (
-    SELECT
-        scenarios.hero_id,
-        SUM(scenarios.games)::bigint AS games,
-        SUM(scenarios.wins)::bigint AS wins
-    FROM scenarios
-    CROSS JOIN bounds
-    WHERE scenarios.item IS NULL
-      AND scenarios.epoch_week >= bounds.current_week - 3
-      AND scenarios.epoch_week <= bounds.current_week
-    GROUP BY scenarios.hero_id
-)
-SELECT monthly.hero_id, heroes.localized_name, monthly.games, monthly.wins
-FROM monthly
-JOIN heroes ON heroes.id = monthly.hero_id
-ORDER BY monthly.games DESC
-""".strip()
 
     def _set_current_stats_period(self) -> None:
         current_week = int(time.time() // SECONDS_PER_WEEK)
@@ -168,11 +145,32 @@ ORDER BY monthly.games DESC
                     # 上游偶发超时很常见；短退避重试，避免瞬时故障直接影响用户。
                     self._sleep(self.retry_backoff * (2**attempt))
                     continue
-                raise OpenDotaApiError(f"OpenDota 请求失败: {error}") from error
+                if status_code is not None:
+                    detail = self._response_error_detail(error.response)
+                    suffix = f", detail={detail}" if detail else ""
+                    # 不输出完整 URL，避免超长 SQL 或查询参数污染生产日志。
+                    message = (
+                        f"OpenDota 请求失败: HTTP {status_code}, path={path}{suffix}"
+                    )
+                else:
+                    message = f"OpenDota 网络请求失败: {type(error).__name__}"
+                raise OpenDotaApiError(message) from error
             except ValueError as error:
                 raise OpenDotaApiError(f"OpenDota 响应不是有效 JSON: {error}") from error
 
         raise AssertionError("OpenDota 重试循环异常退出")
+
+    @staticmethod
+    def _response_error_detail(response: Any) -> str:
+        try:
+            payload = response.json()
+            detail = payload.get("error") or payload.get("err")
+            if not isinstance(detail, str):
+                return ""
+            # 上游正文不可信，只保留单行短文本用于诊断。
+            return " ".join(detail.split())[:200]
+        except (AttributeError, TypeError, ValueError):
+            return ""
 
     def _save_hero_stats_cache(self, payload: list[dict[str, Any]]) -> None:
         if self.cache_path is None:
@@ -213,13 +211,30 @@ ORDER BY monthly.games DESC
             return None
 
     @staticmethod
-    def _parse_monthly_stat(row: dict[str, Any]) -> HeroWinRateStat:
+    def _aggregate_monthly_stats(
+        rows: list[dict[str, Any]],
+    ) -> list[HeroWinRateStat]:
+        totals: dict[int, list[int]] = {}
         try:
-            return HeroWinRateStat(
-                hero_id=int(row["hero_id"]),
-                hero_name=str(row["localized_name"]),
-                games=int(row["games"]),
-                wins=int(row["wins"]),
-            )
+            for row in rows:
+                hero_id = int(row["hero_id"])
+                games = int(row["games"])
+                wins = int(row["wins"])
+                if games < 0 or wins < 0 or wins > games:
+                    raise ValueError("胜负场次不合法")
+                aggregate = totals.setdefault(hero_id, [0, 0])
+                aggregate[0] += games
+                aggregate[1] += wins
         except (KeyError, TypeError, ValueError) as error:
-            raise OpenDotaApiError(f"无法解析英雄胜率数据: {row}") from error
+            raise OpenDotaApiError("无法解析 OpenDota 英雄胜率数据") from error
+
+        return [
+            HeroWinRateStat(
+                hero_id=hero_id,
+                # 正常运行时由报表层的本地中英文英雄表解析，这里保留可靠后备名。
+                hero_name=f"英雄 {hero_id}",
+                games=games,
+                wins=wins,
+            )
+            for hero_id, (games, wins) in totals.items()
+        ]

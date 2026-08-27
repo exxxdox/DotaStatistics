@@ -1,5 +1,4 @@
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -11,24 +10,32 @@ from lib.open_dota_client import OpenDotaApiClient, OpenDotaApiError
 class StubOpenDotaClient(OpenDotaApiClient):
     def __init__(self, rows: list[dict[str, Any]]) -> None:
         self.rows = rows
-        self.last_sql = ""
+        self.last_path = ""
         self.cache_path = None
         self.used_cached_hero_stats = False
 
-    def explorer(self, sql: str):
-        self.last_sql = sql
+    def _get(self, path: str, params=None):
+        self.last_path = path
         return self.rows
 
 
-def test_monthly_leaders_query_complete_weeks_and_parse_rows() -> None:
+def test_monthly_leaders_aggregate_all_lane_roles_and_duration_buckets() -> None:
     client = StubOpenDotaClient(
         [
             {
                 "hero_id": "1",
-                "localized_name": "Anti-Mage",
-                "games": "200",
-                "wins": "120",
-            }
+                "lane_role": 1,
+                "time": 1800,
+                "games": "80",
+                "wins": "48",
+            },
+            {
+                "hero_id": "1",
+                "lane_role": 2,
+                "time": 2700,
+                "games": "120",
+                "wins": "72",
+            },
         ]
     )
 
@@ -36,10 +43,8 @@ def test_monthly_leaders_query_complete_weeks_and_parse_rows() -> None:
 
     assert stats[0].win_rate == 0.6
     assert stats[0].games == 200
-    assert "FROM scenarios" in client.last_sql
-    assert "scenarios.item IS NULL" in client.last_sql
-    assert "bounds.current_week - 3" in client.last_sql
-    assert "scenarios.epoch_week <= bounds.current_week" in client.last_sql
+    assert stats[0].wins == 120
+    assert client.last_path == "/scenarios/laneRoles"
     assert client.stats_period_start is not None
     assert client.stats_period_end is not None
     period_days = (client.stats_period_end - client.stats_period_start).days
@@ -65,7 +70,7 @@ class FakeResponse:
         if self.status_code >= 400:
             raise requests.HTTPError(
                 f"{self.status_code} Server Error",
-                response=SimpleNamespace(status_code=self.status_code),
+                response=self,
             )
 
     def json(self) -> Any:
@@ -102,11 +107,26 @@ def test_get_retries_522_before_succeeding() -> None:
     assert sleeps == [1, 2]
 
 
+def test_get_reports_sanitized_api_error_without_full_url() -> None:
+    client = OpenDotaApiClient(
+        session=FakeSession([FakeResponse(400, {"error": "bad\nquery"})]),
+        max_retries=0,
+        cache_path=None,
+    )
+
+    with pytest.raises(OpenDotaApiError) as captured:
+        client._get("/explorer", params={"sql": "SELECT secret"})
+
+    assert str(captured.value) == (
+        "OpenDota 请求失败: HTTP 400, path=/explorer, detail=bad query"
+    )
+    assert "SELECT secret" not in str(captured.value)
+
+
 def test_hero_stats_falls_back_to_recent_cache() -> None:
     payload = [
         {
             "hero_id": 1,
-            "localized_name": "Anti-Mage",
             "games": 200,
             "wins": 120,
         }
@@ -114,9 +134,7 @@ def test_hero_stats_falls_back_to_recent_cache() -> None:
     cache_path = Path(__file__).parent / ".hero_stats_cache_test.json"
     try:
         live_client = OpenDotaApiClient(
-            session=FakeSession(
-                [FakeResponse(200, {"rows": payload, "err": None})]
-            ),
+            session=FakeSession([FakeResponse(200, payload)]),
             max_retries=0,
             cache_path=cache_path,
         )
@@ -129,7 +147,7 @@ def test_hero_stats_falls_back_to_recent_cache() -> None:
         )
         stats = cached_client.get_recent_month_win_rate_leaders()
 
-        assert stats[0].hero_name == "Anti-Mage"
+        assert stats[0].hero_name == "英雄 1"
         assert cached_client.used_cached_hero_stats is True
     finally:
         # 测试缓存是精确命名的临时产物，结束时不留在工作区。

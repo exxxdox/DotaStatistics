@@ -52,6 +52,16 @@ def test_command_errors_do_not_fall_through_to_ai() -> None:
     assert router.dispatch("今儿 陌生人") == "还没有追踪选手「陌生人」。"
 
 
+def test_legacy_menu_placeholders_are_treated_as_missing_arguments() -> None:
+    router = build_router()
+
+    assert router.dispatch("追踪术 昵称 dotaId") == (
+        "请输入昵称和 dotaId，例如：追踪术 小明 123456789"
+    )
+    assert router.dispatch("撒情况 昵称") == "请输入昵称，例如：撒情况 小明"
+    assert router.dispatch("今儿 昵称") == "请输入昵称，例如：今儿 小明"
+
+
 def test_unknown_message_uses_configured_fallback() -> None:
     assert build_router().dispatch("你好") == "AI:你好"
     assert CommandRouter(build_router().services, ai_enabled=False).dispatch("你好") == "听不懂。"
