@@ -61,6 +61,14 @@ def test_any_group_member_can_read_current_group_openid() -> None:
     assert reply == "当前群 OpenID：group-openid"
 
 
+def test_short_group_openid_alias_supports_command_panel_limit() -> None:
+    reply = build_router().dispatch(
+        "群OpenID", CommandContext(group_openid="group-openid")
+    )
+
+    assert reply == "当前群 OpenID：group-openid"
+
+
 def test_group_openid_command_requires_group_context() -> None:
     assert build_router().dispatch("查看当前群OpenID") == "当前消息不包含群 OpenID。"
 
@@ -210,3 +218,31 @@ def test_private_hero_report_keyword_replies_to_requester() -> None:
     assert message.replies == [
         {"msg_type": 0, "content": "上周五位置英雄胜率榜"}
     ]
+
+
+def test_private_menu_command_uses_command_router() -> None:
+    class FakeMessage:
+        content = "简报"
+        id = "incoming-message-id"
+        author = SimpleNamespace(user_openid="user-openid")
+
+        def __init__(self) -> None:
+            self.replies: list[dict[str, object]] = []
+
+        async def reply(self, **kwargs):
+            self.replies.append(kwargs)
+            return SimpleNamespace(id="reply-message-id")
+
+    async def run_private_command() -> FakeMessage:
+        client = MyClient(
+            intents=botpy.Intents(public_messages=True),
+            router=build_router(),
+            ext_handlers=False,
+        )
+        message = FakeMessage()
+        await client.on_c2c_message_create(message)
+        return message
+
+    message = asyncio.run(run_private_command())
+
+    assert message.replies == [{"msg_type": 0, "content": "今日简报"}]

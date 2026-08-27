@@ -12,6 +12,7 @@ from data_center import _log, enable_ai, name_id_ref
 from lib.deepseekapi import deepseekGeneral
 from lib.open_dota_api import getPlayerWL, getRecentMatchesApi
 from lib.utils import SetDotaId, getDotaId, getHeroName
+from service.qq_command_discovery import QQCommandDiscoveryService
 from service.today import todayAnalyze
 from service.weekly_hero_report import WeeklyHeroReportService
 
@@ -24,6 +25,7 @@ class CommandContext:
     """保存依赖当前 QQ 消息事件的命令参数。"""
 
     group_openid: str | None = None
+    conversation_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -61,16 +63,23 @@ class CommandRouter:
         if not words:
             return self._help()
 
-        if words[0].casefold() == "查看当前群openid".casefold():
+        if words[0].casefold() in {
+            "查看当前群openid".casefold(),
+            "群openid".casefold(),
+        }:
             return self._show_group_openid(words[1:], context)
 
         handler = self._commands.get(words[0])
         if handler is not None:
             return handler(words[1:])
         conversation_id = (
-            f"group:{context.group_openid}"
-            if context is not None and context.group_openid
-            else "default"
+            context.conversation_id
+            if context is not None and context.conversation_id
+            else (
+                f"group:{context.group_openid}"
+                if context is not None and context.group_openid
+                else "default"
+            )
         )
         return self.chat(content, conversation_id)
 
@@ -165,6 +174,7 @@ class MyClient(botpy.Client):
         router: CommandRouter,
         report_group_openid: str | None = None,
         weekly_report: WeeklyHeroReportService | None = None,
+        command_discovery: QQCommandDiscoveryService | None = None,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
@@ -173,6 +183,10 @@ class MyClient(botpy.Client):
         self.weekly_report = weekly_report or WeeklyHeroReportService(
             hero_name_resolver=getHeroName
         )
+        self.command_discovery = command_discovery or QQCommandDiscoveryService(
+            self.api._http.request
+        )
+        self._command_discovery_configured = False
         self.scheduler = AsyncIOScheduler(timezone="Asia/Shanghai")
         # 固定任务 ID 配合 replace_existing，避免网关重连后重复发送。
         self.scheduler.add_job(
@@ -184,8 +198,16 @@ class MyClient(botpy.Client):
             replace_existing=True,
         )
 
-    async def on_ready(self):
+    async def on_ready(self) -> None:
         _log.info(f"robot 「{self.robot.name}」 on_ready!")
+        if not self._command_discovery_configured:
+            try:
+                await self.command_discovery.configure()
+                self._command_discovery_configured = True
+                _log.info("单聊自定义菜单和群聊指令面板配置成功")
+            except Exception:
+                # 菜单配置失败不应阻断机器人收发消息和定时任务。
+                _log.exception("配置 QQ 自定义菜单或指令面板失败")
         if not self.report_group_openid:
             _log.warning("未配置 QQBOT_GROUP_OPENID，晚八点英雄胜率榜不会发送")
         elif not self.scheduler.running:
@@ -194,7 +216,7 @@ class MyClient(botpy.Client):
 
     async def on_group_at_message_create(self, message: GroupMessage):
         try:
-            if message.content.strip() == "测试英雄胜率榜":
+            if message.content.strip() in {"测试英雄胜率榜", "测试胜率榜"}:
                 # 手动测试复用定时任务的主动发送方法和目标群，不走当前消息回复通道。
                 sent = await self._send_weekly_hero_report()
                 reply = (
@@ -230,7 +252,9 @@ class MyClient(botpy.Client):
                 # OpenID 只用于本地隔离上下文，不写日志也不发送给模型。
                 conversation_id = f"c2c:{user_openid or message.id}"
                 reply = await asyncio.to_thread(
-                    self.router.chat, message.content, conversation_id
+                    self.router.dispatch,
+                    message.content,
+                    CommandContext(conversation_id=conversation_id),
                 )
         except Exception:
             _log.exception("处理私聊消息失败")
