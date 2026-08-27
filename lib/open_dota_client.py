@@ -250,7 +250,7 @@ GROUP BY hero_id
         try:
             return self.explorer(sql)
         except OpenDotaApiError as error:
-            if remaining_splits <= 0 or not self._is_statement_timeout(error):
+            if remaining_splits <= 0 or not self._is_query_timeout(error):
                 raise
 
             # Explorer 负载高时可能终止单日聚合；缩小时间窗口比原样重试
@@ -273,8 +273,9 @@ GROUP BY hero_id
             ]
 
     @staticmethod
-    def _is_statement_timeout(error: OpenDotaApiError) -> bool:
-        return "statement timeout" in str(error).casefold()
+    def _is_query_timeout(error: OpenDotaApiError) -> bool:
+        message = str(error).casefold()
+        return "statement timeout" in message or "query read timeout" in message
 
     def _get(self, path: str, params: dict[str, Any] | None = None) -> Any:
         for attempt in range(self.max_retries + 1):

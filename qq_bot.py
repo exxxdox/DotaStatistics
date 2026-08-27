@@ -17,6 +17,7 @@ from service.weekly_hero_report import HeroWinRateReportService
 
 CommandHandler = Callable[[list[str]], str]
 PRIVATE_HERO_REPORT_COMMAND = "高胜率英雄"
+HERO_REPORT_REPLY_TIMEOUT_SECONDS = 20.0
 
 
 def normalize_command_content(content: str) -> str:
@@ -189,6 +190,7 @@ class MyClient(botpy.Client):
         router: CommandRouter,
         hero_win_rate_report: HeroWinRateReportService | None = None,
         command_discovery: QQCommandDiscoveryService | None = None,
+        hero_report_reply_timeout: float = HERO_REPORT_REPLY_TIMEOUT_SECONDS,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
@@ -199,6 +201,8 @@ class MyClient(botpy.Client):
         self.command_discovery = command_discovery or QQCommandDiscoveryService(
             self.api._http.request
         )
+        self.hero_report_reply_timeout = hero_report_reply_timeout
+        self._background_report_tasks: set[asyncio.Task[str]] = set()
         self._command_discovery_configured = False
 
     async def on_ready(self) -> None:
@@ -221,7 +225,7 @@ class MyClient(botpy.Client):
                 "测试胜率榜",
             }:
                 # 旧指令面板可能短期缓存“测试胜率榜”，统一改为回复当前请求。
-                reply = await asyncio.to_thread(self.hero_win_rate_report.build)
+                reply = await self._build_hero_report_with_deadline()
             else:
                 # 查询接口和 AI SDK 都是同步调用，移出事件循环以免阻塞其他消息。
                 context = CommandContext(group_openid=message.group_openid)
@@ -245,7 +249,7 @@ class MyClient(botpy.Client):
             normalized_content = normalize_command_content(message.content)
             if normalized_content == PRIVATE_HERO_REPORT_COMMAND:
                 # 英雄榜只在用户主动请求时生成，并直接回复当前会话。
-                reply = await asyncio.to_thread(self.hero_win_rate_report.build)
+                reply = await self._build_hero_report_with_deadline()
             else:
                 user_openid = getattr(message.author, "user_openid", None)
                 # OpenID 只用于本地隔离上下文，不写日志也不发送给模型。
@@ -261,6 +265,31 @@ class MyClient(botpy.Client):
 
         result = await message.reply(msg_type=0, content=reply)
         _log.info(f"私聊消息回复成功: message_id={getattr(result, 'id', None)}")
+
+    async def _build_hero_report_with_deadline(self) -> str:
+        """避免首次回填耗尽 QQ 原消息的可回复时间。"""
+        task = asyncio.create_task(asyncio.to_thread(self.hero_win_rate_report.build))
+        self._background_report_tasks.add(task)
+        try:
+            result = await asyncio.wait_for(
+                asyncio.shield(task), timeout=self.hero_report_reply_timeout
+            )
+            self._background_report_tasks.discard(task)
+            return result
+        except TimeoutError:
+            # 不取消线程，让逐日统计继续写入缓存；用户稍后主动查询即可命中缓存。
+            task.add_done_callback(self._finish_background_report)
+            return "英雄胜率数据正在更新，请稍后再次查询。"
+        except Exception:
+            self._background_report_tasks.discard(task)
+            raise
+
+    def _finish_background_report(self, task: asyncio.Task[str]) -> None:
+        self._background_report_tasks.discard(task)
+        try:
+            task.result()
+        except Exception:
+            _log.exception("后台更新英雄胜率数据失败")
 
 
 def start() -> None:

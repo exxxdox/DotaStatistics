@@ -1,4 +1,5 @@
 import asyncio
+import time
 from types import SimpleNamespace
 
 import botpy
@@ -135,6 +136,45 @@ def test_group_hero_report_replies_to_current_request() -> None:
     assert [message.replies for message in messages] == [
         [{"msg_type": 0, "content": "当前英雄胜率榜"}],
         [{"msg_type": 0, "content": "当前英雄胜率榜"}],
+    ]
+
+
+def test_slow_group_hero_report_replies_before_background_update_finishes() -> None:
+    class SlowWeeklyReport:
+        def build(self) -> str:
+            time.sleep(0.05)
+            return "后台生成的英雄胜率榜"
+
+    class FakeMessage:
+        content = "/高胜率英雄"
+        group_openid = "current-group"
+
+        def __init__(self) -> None:
+            self.replies: list[dict[str, object]] = []
+
+        async def reply(self, **kwargs):
+            self.replies.append(kwargs)
+            return SimpleNamespace(id="reply-message-id")
+
+    async def run_request() -> FakeMessage:
+        client = MyClient(
+            intents=botpy.Intents(public_messages=True),
+            router=build_router(),
+            hero_win_rate_report=SlowWeeklyReport(),
+            hero_report_reply_timeout=0.001,
+            ext_handlers=False,
+        )
+        message = FakeMessage()
+        await client.on_group_at_message_create(message)
+        # 等待后台线程结束，验证超时只影响当次回复，不会取消缓存更新。
+        await asyncio.sleep(0.1)
+        assert not client._background_report_tasks
+        return message
+
+    message = asyncio.run(run_request())
+
+    assert message.replies == [
+        {"msg_type": 0, "content": "英雄胜率数据正在更新，请稍后再次查询。"}
     ]
 
 

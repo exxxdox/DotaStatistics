@@ -59,7 +59,16 @@ def test_daily_query_uses_exact_utc_day_boundaries() -> None:
     assert "CROSS JOIN LATERAL" not in captured_sql
 
 
-def test_daily_query_splits_and_merges_on_statement_timeout() -> None:
+@pytest.mark.parametrize(
+    "timeout_detail",
+    [
+        "canceling statement due to statement timeout",
+        "Error: Query read timeout",
+    ],
+)
+def test_daily_query_splits_and_merges_on_query_timeout(
+    timeout_detail: str,
+) -> None:
     client = OpenDotaApiClient(cache_path=None)
     captured_sql: list[str] = []
 
@@ -67,8 +76,7 @@ def test_daily_query_splits_and_merges_on_statement_timeout() -> None:
         captured_sql.append(sql)
         if len(captured_sql) == 1:
             raise OpenDotaApiError(
-                "OpenDota 请求失败: HTTP 400, detail=canceling statement "
-                "due to statement timeout"
+                f"OpenDota 请求失败: HTTP 400, detail={timeout_detail}"
             )
         return [{"hero_id": 1, "games": 10, "wins": 6}]
 
