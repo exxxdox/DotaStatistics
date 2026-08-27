@@ -12,6 +12,8 @@ from typing import Any
 
 import requests
 
+from lib.utils import whetherWin
+
 _log = logging.getLogger(__name__)
 DEFAULT_HERO_STATS_CACHE_PATH = (
     Path(__file__).resolve().parent.parent / "res" / "daily_hero_stats_cache.json"
@@ -58,8 +60,10 @@ class OpenDotaApiClient:
         refresh_workers: int = 1,
         sleep: Callable[[float], None] = time.sleep,
         now: Callable[[], datetime] = _utc_now,
+        hero_name_resolver: Callable[[int], str | None] | None = None,
     ) -> None:
         self.timeout = timeout
+        self.hero_name_resolver = hero_name_resolver
         self.session = session or requests.Session()
         self.session.headers.setdefault("User-Agent", "DotaStatistics/0.1")
         self.max_retries = max_retries
@@ -116,6 +120,125 @@ class OpenDotaApiClient:
     ) -> list[HeroWinRateStat]:
         """兼容旧调用名称，统计口径已调整为最近 30 个完整自然日。"""
         return self.get_recent_month_win_rate_leaders(top_count, min_games)
+
+    def get_player_wl(
+        self, account_id: int, day_offset: int
+    ) -> tuple[int, int] | None:
+        """查询玩家指定日偏移的胜负场次；上游异常时返回 None。"""
+        try:
+            payload = self._get(
+                f"/players/{account_id}/wl",
+                params={"game_mode": 22, "date": day_offset},
+            )
+            return int(payload["win"]), int(payload["lose"])
+        except (OpenDotaApiError, KeyError, TypeError, ValueError):
+            _log.warning("查询玩家胜负失败: account_id=%s", account_id)
+            return None
+
+    def get_heroes(self) -> dict[int, str]:
+        """返回 OpenDota 英雄 ID 到英文名的映射，用于解析中文名缺失的英雄。"""
+        payload = self._get("/heroes")
+        return {
+            int(hero["id"]): hero["name"]
+            for hero in payload
+            if isinstance(hero, dict) and "id" in hero and "name" in hero
+        }
+
+    def get_recent_matches(self, account_id: int, limit: int = 3) -> str | None:
+        """格式化最近几场天梯比赛；上游异常时返回 None。"""
+        try:
+            payload = self._get(f"/players/{account_id}/recentMatches")
+        except OpenDotaApiError:
+            _log.warning("查询近期比赛失败: account_id=%s", account_id)
+            return None
+        result = "\n"
+        size = 0
+        for game in payload:
+            if game.get("game_mode") != 22:
+                continue
+            radiant_win = game.get("radiant_win")
+            player_slot = game.get("player_slot")
+            mr_lin = (
+                "哦嘎嘎嘎嘎暴利,赢了一把."
+                if whetherWin(radiant_win, player_slot)
+                else "曾恶心啊,尽力了."
+            )
+            hero_id = game.get("hero_id")
+            hero_damage = game.get("hero_damage")
+            hero_healing = game.get("hero_healing")
+            deaths = game.get("deaths")
+            kills = game.get("kills")
+            assists = game.get("assists")
+            gold_per_min = game.get("gold_per_min")
+            result += (
+                f"{mr_lin} 英雄:{self._hero_name(hero_id)} "
+                f"伤害:{hero_damage} 杀:{kills} 死:{deaths} "
+                f"助攻:{assists} gpm:{gold_per_min}\n"
+            )
+            size += 1
+            if size >= limit:
+                break
+        return result
+
+    def get_match_detail(self, match_id: int, account_id: int) -> str:
+        """格式化单场比赛的指定玩家数据，供日报逐场拼接。"""
+        payload = self._get(f"/matches/{match_id}")
+        result = f" 持续时间{payload.get('duration')}秒 "
+        for player in payload.get("players"):
+            if player.get("account_id") == account_id:
+                is_radiant = player.get("isRadiant")
+                gold_per_min = player.get("gold_per_min")
+                xp_per_min = player.get("xp_per_min")
+                hero_damage = player.get("hero_damage")
+                tower_damage = player.get("tower_damage")
+                hero_healing = player.get("hero_healing")
+                total_gold = player.get("total_gold")
+                total_xp = player.get("total_xp")
+                result += (
+                    f" {'天辉' if is_radiant else '夜魇'} "
+                    f"gpm {gold_per_min} xpm {xp_per_min} "
+                    f"对英雄伤害{hero_damage} 对英雄治疗{hero_healing} "
+                    f"建筑伤害{tower_damage} 总金钱{total_gold} 总经验 {total_xp} "
+                )
+        return result
+
+    def get_matches_by_date(self, account_id: int, date: int) -> str:
+        """格式化指定日期的天梯比赛列表；无数据时返回空串。"""
+        try:
+            payload = self._get(
+                f"/players/{account_id}/matches", params={"date": date}
+            )
+        except OpenDotaApiError:
+            _log.warning("查询玩家比赛失败: account_id=%s", account_id)
+            return ""
+        result = ""
+        for game in payload:
+            if game.get("game_mode") != 22:
+                continue
+            match_id = game.get("match_id")
+            radiant_win = game.get("radiant_win")
+            player_slot = game.get("player_slot")
+            mr_lin = "游戏" + ("胜利" if whetherWin(radiant_win, player_slot) else "失败")
+            hero_id = game.get("hero_id")
+            deaths = game.get("deaths")
+            kills = game.get("kills")
+            assists = game.get("assists")
+            result += (
+                f"{mr_lin} 英雄:{self._hero_name(hero_id)} "
+                f"击杀:{kills} 死亡:{deaths} 助攻:{assists} "
+                f"{self.get_match_detail(match_id, account_id)}\n"
+            )
+        if not result:
+            return ""
+        return f"{result}此玩家数据结束\n"
+
+    def _hero_name(self, hero_id: int) -> str:
+        """解析英雄名；解析器缺失或未命中时使用占位名，避免把 None 拼进展示。"""
+        if self.hero_name_resolver is not None:
+            resolved_name = self.hero_name_resolver(hero_id)
+            if resolved_name:
+                return resolved_name
+        return f"英雄 {hero_id}"
 
     def _load_or_refresh_monthly_stats(self) -> list[HeroWinRateStat]:
         self.used_cached_hero_stats = False

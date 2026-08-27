@@ -1,7 +1,7 @@
 import logging
 from collections.abc import Callable
 
-from lib.deepseekapi import deepseekHeroRecommendations
+from lib.deepseek_api import deepseek_hero_recommendations
 from lib.open_dota_client import HeroWinRateStat, OpenDotaApiClient
 
 _log = logging.getLogger(__name__)
@@ -20,7 +20,7 @@ class HeroWinRateReportService:
         self.api_client = api_client or OpenDotaApiClient()
         self.hero_name_resolver = hero_name_resolver
         self.recommendation_analyzer = (
-            recommendation_analyzer or deepseekHeroRecommendations
+            recommendation_analyzer or deepseek_hero_recommendations
         )
         self.min_games = min_games
 

@@ -8,7 +8,7 @@ https://docs.opendota.com
 
 ## Project Structure & Module Organization
 
-`main.py` is the application entry point, while `qq_bot.py` contains the QQ SDK client, command parsing, and dependency-injected bot services. Shared state and resource paths live in `data_center.py`. Put external integrations in `lib/` (`open_dota_api.py`, `deepseekapi.py`) and higher-level report workflows in `service/`. Static and deployment assets belong in `res/`; generated `res/name_id.json` is intentionally ignored. Tests live in `tests/` and should mirror the module under test, for example `tests/test_qq_bot.py`.
+`main.py` is the application entry point, while `qq_bot.py` contains the QQ SDK client, command routing, and dependency assembly (`build_default_services`). Shared config and resource paths live in `data_center.py`; player and hero mappings are owned by repository classes in `lib/` (`player_repository.py`, `hero_name_resolver.py`) rather than global state. Put external integrations in `lib/` (`open_dota_client.py`, `deepseek_api.py`) and higher-level report workflows in `service/`. Static and deployment assets belong in `res/`; generated `res/name_id.json` is intentionally ignored. Tests live in `tests/` and should mirror the module under test, for example `tests/test_qq_bot.py`.
 
 ## Build, Test, and Development Commands
 

@@ -16,6 +16,8 @@ def build_router(**overrides) -> CommandRouter:
         "get_player_wl": lambda _dota_id, _days: (2, 1),
         "get_today_report": lambda: "今日简报",
         "chat": lambda message, _conversation_id: f"AI:{message}",
+        "resolve_hero_name": lambda _hero_id: None,
+        "list_player_nicknames": lambda: [],
     }
     defaults.update(overrides)
     return CommandRouter(BotServices(**defaults))

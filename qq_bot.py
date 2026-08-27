@@ -7,13 +7,14 @@ from dataclasses import dataclass
 import botpy
 from botpy.message import C2CMessage, GroupMessage
 
-from data_center import _log, enable_ai, name_id_ref
-from lib.deepseekapi import deepseekGeneral
-from lib.open_dota_api import getPlayerWL, getRecentMatchesApi
-from lib.utils import SetDotaId, getDotaId, getHeroName
+from data_center import _log, common_id_path, enable_ai, hero_excel_path
+from lib.deepseek_api import deepseek_general
+from lib.hero_name_resolver import HeroNameResolver
+from lib.open_dota_client import OpenDotaApiClient, OpenDotaApiError
+from lib.player_repository import PlayerRepository
+from service.hero_win_rate_report import HeroWinRateReportService
 from service.qq_command_discovery import QQCommandDiscoveryService
-from service.today import todayAnalyze
-from service.weekly_hero_report import HeroWinRateReportService
+from service.today import TodayReportService
 
 CommandHandler = Callable[[list[str]], str]
 PRIVATE_HERO_REPORT_COMMAND = "高胜率英雄"
@@ -41,12 +42,38 @@ class CommandContext:
 class BotServices:
     """集中声明外部依赖，避免命令解析与网络、存储实现强耦合。"""
 
-    set_dota_id: Callable[[str, int], None] = SetDotaId
-    get_dota_id: Callable[[str], int | None] = getDotaId
-    get_recent_matches: Callable[[int], str | None] = getRecentMatchesApi
-    get_player_wl: Callable[[int, int], tuple[int, int] | None] = getPlayerWL
-    get_today_report: Callable[[], str] = todayAnalyze
-    chat: Callable[[str, str], str] = deepseekGeneral
+    set_dota_id: Callable[[str, int], None]
+    get_dota_id: Callable[[str], int | None]
+    get_recent_matches: Callable[[int], str | None]
+    get_player_wl: Callable[[int, int], tuple[int, int] | None]
+    get_today_report: Callable[[], str]
+    chat: Callable[[str, str], str]
+    resolve_hero_name: Callable[[int], str | None]
+    list_player_nicknames: Callable[[], list[str]]
+
+
+def build_default_services() -> BotServices:
+    """组装依赖真实实现的 BotServices，供 CommandRouter 默认使用。"""
+    players = PlayerRepository(common_id_path)
+    hero_names = HeroNameResolver(hero_excel_path)
+    hero_names.load()
+    api_client = OpenDotaApiClient(hero_name_resolver=hero_names.resolve)
+    try:
+        hero_names.set_en_names(api_client.get_heroes())
+    except OpenDotaApiError:
+        # 网络失败不阻断启动，中文名已足够覆盖常见英雄。
+        _log.warning("获取 OpenDota 英雄英文名失败，使用中文名后备")
+    today_report = TodayReportService(players=players, api_client=api_client)
+    return BotServices(
+        set_dota_id=players.set,
+        get_dota_id=players.get,
+        get_recent_matches=api_client.get_recent_matches,
+        get_player_wl=api_client.get_player_wl,
+        get_today_report=today_report.build,
+        chat=deepseek_general,
+        resolve_hero_name=hero_names.resolve,
+        list_player_nicknames=players.nicknames,
+    )
 
 
 class CommandRouter:
@@ -57,7 +84,7 @@ class CommandRouter:
         services: BotServices | None = None,
         ai_enabled: bool = enable_ai,
     ):
-        self.services = services or BotServices()
+        self.services = services or build_default_services()
         self.ai_enabled = ai_enabled
         self._commands: dict[str, CommandHandler] = {
             "追踪术": self._track,
@@ -111,7 +138,7 @@ class CommandRouter:
         return f"当前群 OpenID：{context.group_openid}"
 
     def _help(self) -> str:
-        players = " ".join(nickname for target in name_id_ref for nickname in target)
+        players = " ".join(self.services.list_player_nicknames())
         return (
             "\n指令列表:\n"
             "@我 追踪术 昵称 dotaId\n"
@@ -196,7 +223,7 @@ class MyClient(botpy.Client):
         super().__init__(*args, **kwargs)
         self.router = router
         self.hero_win_rate_report = hero_win_rate_report or HeroWinRateReportService(
-            hero_name_resolver=getHeroName
+            hero_name_resolver=self.router.services.resolve_hero_name
         )
         self.command_discovery = command_discovery or QQCommandDiscoveryService(
             self.api._http.request

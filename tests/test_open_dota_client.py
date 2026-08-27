@@ -217,3 +217,147 @@ def test_get_reports_sanitized_api_error_without_full_url() -> None:
         "OpenDota 请求失败: HTTP 400, path=/explorer, detail=bad query"
     )
     assert "SELECT secret" not in str(captured.value)
+
+
+def test_get_player_wl_returns_win_loss_tuple() -> None:
+    client = OpenDotaApiClient(
+        session=FakeSession([FakeResponse(200, {"win": 3, "lose": 1})]),
+        max_retries=0,
+        cache_path=None,
+    )
+
+    assert client.get_player_wl(123, 1) == (3, 1)
+    assert client.session.calls == 1
+
+
+def test_get_player_wl_returns_none_on_api_error() -> None:
+    client = OpenDotaApiClient(
+        session=FakeSession([FakeResponse(502, {"error": "boom"})]),
+        max_retries=0,
+        cache_path=None,
+    )
+
+    assert client.get_player_wl(123, 1) is None
+
+
+def test_get_recent_matches_filters_non_ranked_and_limits() -> None:
+    recent = [
+        {
+            "game_mode": 22,
+            "radiant_win": True,
+            "player_slot": 0,
+            "hero_id": 1,
+            "kills": 5,
+            "deaths": 3,
+            "assists": 2,
+            "hero_damage": 100,
+            "hero_healing": 0,
+            "gold_per_min": 500,
+        },
+        {"game_mode": 23, "hero_id": 2},  # 非天梯，应被过滤
+        {
+            "game_mode": 22,
+            "radiant_win": False,
+            "player_slot": 128,
+            "hero_id": 3,
+            "kills": 1,
+            "deaths": 9,
+            "assists": 0,
+            "hero_damage": 20,
+            "hero_healing": 0,
+            "gold_per_min": 200,
+        },
+    ]
+    client = OpenDotaApiClient(
+        session=FakeSession([FakeResponse(200, recent)]),
+        max_retries=0,
+        cache_path=None,
+        hero_name_resolver=lambda hero_id: "敌法师" if hero_id == 1 else None,
+    )
+
+    result = client.get_recent_matches(123, limit=2)
+
+    assert result is not None
+    assert result.count("敌法师") == 1
+    assert result.count("英雄 3") == 1
+    assert client.session.calls == 1
+
+
+def test_get_recent_matches_returns_none_on_api_error() -> None:
+    client = OpenDotaApiClient(
+        session=FakeSession([FakeResponse(522)]),
+        max_retries=0,
+        cache_path=None,
+    )
+
+    assert client.get_recent_matches(123) is None
+
+
+def test_get_matches_by_date_formats_detail_and_appends_end_marker() -> None:
+    matches = [
+        {
+            "game_mode": 22,
+            "match_id": 9,
+            "radiant_win": True,
+            "player_slot": 0,
+            "hero_id": 1,
+            "kills": 5,
+            "deaths": 3,
+            "assists": 2,
+        }
+    ]
+    detail = {
+        "duration": 3000,
+        "players": [
+            {
+                "account_id": 123,
+                "isRadiant": True,
+                "gold_per_min": 500,
+                "xp_per_min": 400,
+                "hero_damage": 900,
+                "tower_damage": 100,
+                "hero_healing": 0,
+                "total_gold": 10000,
+                "total_xp": 9000,
+            }
+        ],
+    }
+    client = OpenDotaApiClient(
+        session=FakeSession([FakeResponse(200, matches), FakeResponse(200, detail)]),
+        max_retries=0,
+        cache_path=None,
+        hero_name_resolver=lambda hero_id: "敌法师" if hero_id == 1 else None,
+    )
+
+    result = client.get_matches_by_date(123, 1)
+
+    assert "游戏胜利 英雄:敌法师 击杀:5 死亡:3 助攻:2" in result
+    assert "持续时间3000秒" in result
+    assert "此玩家数据结束" in result
+
+
+def test_get_matches_by_date_returns_empty_string_when_no_ranked_games() -> None:
+    client = OpenDotaApiClient(
+        session=FakeSession([FakeResponse(200, [{"game_mode": 23}])]),
+        max_retries=0,
+        cache_path=None,
+    )
+
+    assert client.get_matches_by_date(123, 1) == ""
+
+
+def test_get_heroes_returns_id_to_name_mapping() -> None:
+    client = OpenDotaApiClient(
+        session=FakeSession(
+            [
+                FakeResponse(
+                    200,
+                    [{"id": 1, "name": "anti-mage"}, {"id": 2, "name": "axe"}],
+                )
+            ]
+        ),
+        max_retries=0,
+        cache_path=None,
+    )
+
+    assert client.get_heroes() == {1: "anti-mage", 2: "axe"}

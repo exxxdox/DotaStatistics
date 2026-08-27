@@ -1,16 +1,6 @@
-"""DotaStatistics 入口：初始化选手与英雄引用后启动 QQ 机器人。"""
+"""DotaStatistics 入口：启动 QQ 机器人，依赖组装在 qq_bot.build_default_services 中完成。"""
 
-from lib import open_dota_api
 import qq_bot
-from lib.utils import init_name_id_ref, readHeroNameFromExcelConfig
 
-
-def init():
-    init_name_id_ref()
-    readHeroNameFromExcelConfig()
-    open_dota_api.getHeroEnNameApi()
-
-
-if __name__ == '__main__':
-    init()
+if __name__ == "__main__":
     qq_bot.start()

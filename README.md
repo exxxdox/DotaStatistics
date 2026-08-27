@@ -16,17 +16,18 @@ QQ 群聊/私聊机器人：Dota 2 战绩统计与高胜率英雄分析。数据
 
 ```
 .
-├── main.py                       # 入口：初始化选手/英雄引用后启动 QQ 机器人
-├── qq_bot.py                     # QQ 客户端、命令路由、依赖注入
-├── data_center.py                # 共享状态与资源路径
+├── main.py                       # 入口：启动 QQ 机器人
+├── qq_bot.py                     # QQ 客户端、命令路由、依赖组装
+├── data_center.py                # 共享配置与资源路径
 ├── lib/
-│   ├── open_dota_api.py          # OpenDota 基础接口封装
-│   ├── open_dota_client.py       # OpenDota 统计客户端（缓存、重试、超时拆分）
-│   ├── deepseekapi.py            # DeepSeek 对话与数据分析
-│   └── utils.py                  # 选手/英雄映射与本地文件读写
+│   ├── open_dota_client.py       # OpenDota API 客户端（缓存、重试、超时拆分、比赛查询）
+│   ├── deepseek_api.py           # DeepSeek 对话与数据分析
+│   ├── player_repository.py      # 追踪选手映射（name_id.json 读写）
+│   ├── hero_name_resolver.py     # 英雄 ID 到名称解析（xlsx 中文名）
+│   └── utils.py                  # 通用纯函数
 ├── service/
-│   ├── today.py                  # 每日简报
-│   ├── weekly_hero_report.py     # 英雄胜率榜报表
+│   ├── today.py                  # 每日简报（依赖注入）
+│   ├── hero_win_rate_report.py   # 英雄胜率榜报表
 │   └── qq_command_discovery.py   # 单聊菜单/群指令面板同步
 ├── res/
 │   ├── dota.service              # systemd 单元模板

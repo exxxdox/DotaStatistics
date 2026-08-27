@@ -19,8 +19,8 @@ def get_client() -> OpenAI:
     return OpenAI(api_key=api_key, base_url="https://api.deepseek.com")
 
 
-def deepseekDotaAnalyze(msg: str) -> str:
-    _log.info("in deepseekDotaAnalyze")
+def deepseek_dota_analyze(msg: str) -> str:
+    _log.info("in deepseek_dota_analyze")
     response = get_client().chat.completions.create(
         model=FLASH_MODEL,
         messages=[
@@ -36,9 +36,9 @@ def deepseekDotaAnalyze(msg: str) -> str:
     return response.choices[0].message.content or ""
 
 
-def deepseekHeroRecommendations(stats: str) -> str:
+def deepseek_hero_recommendations(stats: str) -> str:
     """根据客观胜率候选集，推荐 1—5 号位英雄。"""
-    _log.info("in deepseekHeroRecommendations")
+    _log.info("in deepseek_hero_recommendations")
     response = get_client().chat.completions.create(
         model=FLASH_MODEL,
         messages=[
@@ -62,8 +62,8 @@ def deepseekHeroRecommendations(stats: str) -> str:
     return response.choices[0].message.content or ""
 
 
-def deepseekGeneral(msg: str, conversation_id: str = "default") -> str:
-    _log.info("in deepseekGeneral")
+def deepseek_general(msg: str, conversation_id: str = "default") -> str:
+    _log.info("in deepseek_general")
     now = datetime.now()
 
     # 对话按 QQ 会话隔离，避免群聊和不同私聊用户共享短期上下文。

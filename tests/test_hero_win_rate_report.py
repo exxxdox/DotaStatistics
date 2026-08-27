@@ -1,7 +1,7 @@
 from datetime import date
 
 from lib.open_dota_client import HeroWinRateStat
-from service.weekly_hero_report import HeroWinRateReportService
+from service.hero_win_rate_report import HeroWinRateReportService
 
 
 class StubOpenDotaClient:
