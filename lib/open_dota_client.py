@@ -55,7 +55,7 @@ class OpenDotaApiClient:
         retry_backoff: float = 1.0,
         cache_path: Path | None = DEFAULT_HERO_STATS_CACHE_PATH,
         max_cache_age_seconds: int = 48 * 60 * 60,
-        refresh_workers: int = 4,
+        refresh_workers: int = 1,
         sleep: Callable[[float], None] = time.sleep,
         now: Callable[[], datetime] = _utc_now,
     ) -> None:
@@ -216,30 +216,65 @@ class OpenDotaApiClient:
             target_date.day,
             tzinfo=timezone.utc,
         )
+        return self._fetch_interval_stats(start, start + timedelta(days=1))
+
+    def _fetch_interval_stats(
+        self,
+        start: datetime,
+        end: datetime,
+        remaining_splits: int = 2,
+    ) -> list[dict[str, Any]]:
         start_timestamp = int(start.timestamp())
-        end_timestamp = int((start + timedelta(days=1)).timestamp())
+        end_timestamp = int(end.timestamp())
         sql = f"""
-WITH daily AS (
-    SELECT picked.hero_id, picked.won
-    FROM public_matches AS match
-    CROSS JOIN LATERAL (
-        SELECT radiant.hero_id, match.radiant_win AS won
-        FROM unnest(match.radiant_team) AS radiant(hero_id)
-        UNION ALL
-        SELECT dire.hero_id, NOT match.radiant_win AS won
-        FROM unnest(match.dire_team) AS dire(hero_id)
-    ) AS picked
-    WHERE match.start_time >= {start_timestamp}
-      AND match.start_time < {end_timestamp}
+WITH filtered_matches AS (
+    SELECT radiant_win, radiant_team, dire_team
+    FROM public_matches
+    WHERE start_time >= {start_timestamp}
+      AND start_time < {end_timestamp}
+),
+picks AS (
+    SELECT unnest(radiant_team) AS hero_id, radiant_win AS won
+    FROM filtered_matches
+    UNION ALL
+    SELECT unnest(dire_team) AS hero_id, NOT radiant_win AS won
+    FROM filtered_matches
 )
 SELECT
     hero_id,
     COUNT(*)::bigint AS games,
-    SUM(CASE WHEN won THEN 1 ELSE 0 END)::bigint AS wins
-FROM daily
+    COUNT(*) FILTER (WHERE won)::bigint AS wins
+FROM picks
 GROUP BY hero_id
 """.strip()
-        return self.explorer(sql)
+        try:
+            return self.explorer(sql)
+        except OpenDotaApiError as error:
+            if remaining_splits <= 0 or not self._is_statement_timeout(error):
+                raise
+
+            # Explorer 负载高时可能终止单日聚合；缩小时间窗口比原样重试
+            # 更能稳定利用 start_time 索引，两个结果可在本地无损相加。
+            midpoint = start + (end - start) / 2
+            left_rows = self._fetch_interval_stats(
+                start, midpoint, remaining_splits - 1
+            )
+            right_rows = self._fetch_interval_stats(
+                midpoint, end, remaining_splits - 1
+            )
+            merged = self._aggregate_monthly_stats(left_rows + right_rows)
+            return [
+                {
+                    "hero_id": stat.hero_id,
+                    "games": stat.games,
+                    "wins": stat.wins,
+                }
+                for stat in merged
+            ]
+
+    @staticmethod
+    def _is_statement_timeout(error: OpenDotaApiError) -> bool:
+        return "statement timeout" in str(error).casefold()
 
     def _get(self, path: str, params: dict[str, Any] | None = None) -> Any:
         for attempt in range(self.max_retries + 1):

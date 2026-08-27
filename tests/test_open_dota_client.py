@@ -51,10 +51,39 @@ def test_daily_query_uses_exact_utc_day_boundaries() -> None:
     start = int(datetime(2026, 8, 1, tzinfo=timezone.utc).timestamp())
     end = int(datetime(2026, 8, 2, tzinfo=timezone.utc).timestamp())
     assert rows[0]["games"] == "10"
-    assert f"match.start_time >= {start}" in captured_sql
-    assert f"match.start_time < {end}" in captured_sql
-    assert "unnest(match.radiant_team)" in captured_sql
-    assert "unnest(match.dire_team)" in captured_sql
+    assert f"start_time >= {start}" in captured_sql
+    assert f"start_time < {end}" in captured_sql
+    assert "WITH filtered_matches AS" in captured_sql
+    assert "unnest(radiant_team)" in captured_sql
+    assert "unnest(dire_team)" in captured_sql
+    assert "CROSS JOIN LATERAL" not in captured_sql
+
+
+def test_daily_query_splits_and_merges_on_statement_timeout() -> None:
+    client = OpenDotaApiClient(cache_path=None)
+    captured_sql: list[str] = []
+
+    def explorer(sql: str) -> list[dict[str, Any]]:
+        captured_sql.append(sql)
+        if len(captured_sql) == 1:
+            raise OpenDotaApiError(
+                "OpenDota 请求失败: HTTP 400, detail=canceling statement "
+                "due to statement timeout"
+            )
+        return [{"hero_id": 1, "games": 10, "wins": 6}]
+
+    client.explorer = explorer  # type: ignore[method-assign]
+    rows = client._fetch_daily_stats(date(2026, 8, 1))
+
+    start = int(datetime(2026, 8, 1, tzinfo=timezone.utc).timestamp())
+    midpoint = int(datetime(2026, 8, 1, 12, tzinfo=timezone.utc).timestamp())
+    end = int(datetime(2026, 8, 2, tzinfo=timezone.utc).timestamp())
+    assert len(captured_sql) == 3
+    assert f"start_time >= {start}" in captured_sql[1]
+    assert f"start_time < {midpoint}" in captured_sql[1]
+    assert f"start_time >= {midpoint}" in captured_sql[2]
+    assert f"start_time < {end}" in captured_sql[2]
+    assert rows == [{"hero_id": 1, "games": 20, "wins": 12}]
 
 
 def test_monthly_stats_backfill_once_then_reuse_daily_cache() -> None:
