@@ -1,5 +1,7 @@
 /.env
 .venv/
 .uv-cache/
+res/hero_stats_cache.json
+res/hero_stats_cache.json.tmp
 __pycache__/
 /res/name_id.json

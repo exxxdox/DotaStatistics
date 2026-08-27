@@ -36,3 +36,12 @@ def test_report_formats_all_rank_top_ten_without_positions() -> None:
     assert "号位" not in report
     assert client.arguments is not None
     assert client.arguments == (10, 100)
+
+
+def test_report_marks_cached_open_dota_data() -> None:
+    client = StubOpenDotaClient([])
+    client.used_cached_hero_stats = True
+
+    report = HeroWinRateReportService(api_client=client).build()
+
+    assert "当前展示最近一次成功缓存" in report

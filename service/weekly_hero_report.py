@@ -25,6 +25,8 @@ class HeroWinRateReportService:
             "当前全分段英雄胜率 Top 10",
             f"口径：全段位天梯公开比赛；至少 {self.min_games} 场。",
         ]
+        if getattr(self.api_client, "used_cached_hero_stats", False):
+            lines.append("提示：OpenDota 暂不可用，当前展示最近一次成功缓存。")
         lines.extend(
             f"{index}.{self._hero_name(item)} {item.win_rate:.1%}（{item.games}场）"
             for index, item in enumerate(stats, start=1)

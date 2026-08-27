@@ -22,6 +22,8 @@ Linux 服务器首次部署可执行 `sudo bash ./init.sh`，安装 `uv`、同�
 
 机器人在线时会在每天 20:00（Asia/Shanghai）向 `QQBOT_GROUP_OPENID` 指定的群发送当前榜单。榜单汇总 OpenDota `/heroStats` 中 1—8 全部段位的预聚合数据，展示至少出场 100 次的整体胜率前 10 名英雄，不再按位置拆分。OpenDota 的全分段预聚合接口不提供按周过滤，因此榜单不再标记为“上一自然周”。
 
+OpenDota 遇到 429、5xx、522 或网络错误时会进行有限指数退避重试；成功响应会缓存到 `res/hero_stats_cache.json`。重试仍失败时仅使用 48 小时内的最后成功缓存，并在榜单中标注缓存状态。
+
 ## 配置
 
 systemd 从 `/root/.secrets` 读取环境变量：

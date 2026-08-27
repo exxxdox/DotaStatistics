@@ -1,6 +1,9 @@
+from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
+import requests
 
 from lib.open_dota_client import OpenDotaApiClient, OpenDotaApiError
 
@@ -9,6 +12,8 @@ class StubOpenDotaClient(OpenDotaApiClient):
     def __init__(self, rows: list[dict[str, Any]]) -> None:
         self.rows = rows
         self.last_path = ""
+        self.cache_path = None
+        self.used_cached_hero_stats = False
 
     def _get(self, path: str, params=None):
         self.last_path = path
@@ -42,3 +47,82 @@ def test_all_rank_leaders_reject_invalid_limits() -> None:
 def test_all_rank_leaders_reject_invalid_rows() -> None:
     with pytest.raises(OpenDotaApiError):
         StubOpenDotaClient([{"id": "bad"}]).get_all_rank_win_rate_leaders()
+
+
+class FakeResponse:
+    def __init__(self, status_code: int, payload: Any = None) -> None:
+        self.status_code = status_code
+        self.payload = payload
+
+    def raise_for_status(self) -> None:
+        if self.status_code >= 400:
+            raise requests.HTTPError(
+                f"{self.status_code} Server Error",
+                response=SimpleNamespace(status_code=self.status_code),
+            )
+
+    def json(self) -> Any:
+        return self.payload
+
+
+class FakeSession:
+    def __init__(self, responses: list[FakeResponse]) -> None:
+        self.responses = responses
+        self.headers: dict[str, str] = {}
+        self.calls = 0
+
+    def get(self, *_args, **_kwargs) -> FakeResponse:
+        response = self.responses[self.calls]
+        self.calls += 1
+        return response
+
+
+def test_get_retries_522_before_succeeding() -> None:
+    session = FakeSession(
+        [FakeResponse(522), FakeResponse(522), FakeResponse(200, {"ok": True})]
+    )
+    sleeps: list[float] = []
+    client = OpenDotaApiClient(
+        session=session,
+        max_retries=2,
+        retry_backoff=1,
+        cache_path=None,
+        sleep=sleeps.append,
+    )
+
+    assert client._get("/heroStats") == {"ok": True}
+    assert session.calls == 3
+    assert sleeps == [1, 2]
+
+
+def test_hero_stats_falls_back_to_recent_cache() -> None:
+    payload = [
+        {
+            "id": 1,
+            "localized_name": "Anti-Mage",
+            **{f"{rank}_pick": 25 for rank in range(1, 9)},
+            **{f"{rank}_win": 15 for rank in range(1, 9)},
+        }
+    ]
+    cache_path = Path(__file__).parent / ".hero_stats_cache_test.json"
+    try:
+        live_client = OpenDotaApiClient(
+            session=FakeSession([FakeResponse(200, payload)]),
+            max_retries=0,
+            cache_path=cache_path,
+        )
+        live_client.get_all_rank_win_rate_leaders()
+
+        cached_client = OpenDotaApiClient(
+            session=FakeSession([FakeResponse(522)]),
+            max_retries=0,
+            cache_path=cache_path,
+        )
+        stats = cached_client.get_all_rank_win_rate_leaders()
+
+        assert stats[0].hero_name == "Anti-Mage"
+        assert cached_client.used_cached_hero_stats is True
+    finally:
+        # 测试缓存是精确命名的临时产物，结束时不留在工作区。
+        cache_path.unlink(missing_ok=True)
+        cache_path.with_suffix(".json.tmp").unlink(missing_ok=True)
