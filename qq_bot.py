@@ -115,6 +115,8 @@ class CommandRouter:
         )
 
     def _track(self, args: list[str]) -> str:
+        if not args:
+            return "请输入昵称和 dotaId，例如：追踪术 小明 123456789"
         if len(args) != 2:
             return "用法: 追踪术 昵称 dotaId"
 
@@ -157,6 +159,8 @@ class CommandRouter:
     def _resolve_player(
         self, args: list[str], command: str
     ) -> tuple[str, int, str | None]:
+        if not args:
+            return "", 0, f"请输入昵称，例如：{command} 小明"
         if len(args) != 1:
             return "", 0, f"用法: {command} 昵称"
 

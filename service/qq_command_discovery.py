@@ -20,17 +20,19 @@ def build_private_menu() -> dict[str, Any]:
                         {
                             "name": "追踪术",
                             "type": "send_message",
-                            "send_message": "追踪术 昵称 dotaId",
+                            # 菜单只发送命令名，让路由返回参数提示；占位词不能
+                            # 被误当成用户真实输入传给业务处理函数。
+                            "send_message": "追踪术",
                         },
                         {
                             "name": "撒情况",
                             "type": "send_message",
-                            "send_message": "撒情况 昵称",
+                            "send_message": "撒情况",
                         },
                         {
                             "name": "今儿",
                             "type": "send_message",
-                            "send_message": "今儿 昵称",
+                            "send_message": "今儿",
                         },
                     ],
                 },

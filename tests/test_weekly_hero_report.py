@@ -1,3 +1,5 @@
+from datetime import date
+
 from lib.open_dota_client import HeroWinRateStat
 from service.weekly_hero_report import HeroWinRateReportService
 
@@ -6,8 +8,10 @@ class StubOpenDotaClient:
     def __init__(self, stats: list[HeroWinRateStat]) -> None:
         self.stats = stats
         self.arguments: tuple[int, int] | None = None
+        self.stats_period_start = date(2026, 7, 30)
+        self.stats_period_end = date(2026, 8, 26)
 
-    def get_all_rank_win_rate_leaders(
+    def get_recent_month_win_rate_leaders(
         self,
         top_count: int,
         min_games: int,
@@ -30,7 +34,8 @@ def test_report_formats_all_rank_top_ten_without_positions() -> None:
 
     report = service.build()
 
-    assert "当前全分段英雄胜率 Top 10" in report
+    assert "最近一个月全分段英雄胜率 Top 10" in report
+    assert "2026-07-30 至 2026-08-26（当前周及前三周）" in report
     assert "1.敌法师 60.0%（200场）" in report
     assert "2.Axe 50.0%（150场）" in report
     assert "号位" not in report

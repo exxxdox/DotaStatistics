@@ -4,6 +4,7 @@ import os
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -11,9 +12,11 @@ import requests
 
 _log = logging.getLogger(__name__)
 DEFAULT_HERO_STATS_CACHE_PATH = (
-    Path(__file__).resolve().parent.parent / "res" / "hero_stats_cache.json"
+    Path(__file__).resolve().parent.parent / "res" / "monthly_hero_stats_cache.json"
 )
 RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504, 522, 524}
+SECONDS_PER_WEEK = 7 * 24 * 60 * 60
+RETAINED_EPOCH_WEEKS = 4
 
 
 class OpenDotaApiError(RuntimeError):
@@ -57,6 +60,8 @@ class OpenDotaApiClient:
         self.max_cache_age_seconds = max_cache_age_seconds
         self._sleep = sleep
         self.used_cached_hero_stats = False
+        self.stats_period_start: date | None = None
+        self.stats_period_end: date | None = None
 
         resolved_api_key = api_key or os.environ.get("OPENDOTA_API_KEY")
         if resolved_api_key:
@@ -75,7 +80,7 @@ class OpenDotaApiClient:
             raise OpenDotaApiError("OpenDota explorer 响应缺少 rows")
         return rows
 
-    def get_all_rank_win_rate_leaders(
+    def get_recent_month_win_rate_leaders(
         self,
         top_count: int = 10,
         min_games: int = 100,
@@ -84,26 +89,67 @@ class OpenDotaApiClient:
             raise ValueError("top_count 和 min_games 必须大于 0")
 
         self.used_cached_hero_stats = False
+        self._set_current_stats_period()
         try:
-            payload = self._get("/heroStats")
+            # scenarios 是 OpenDota 按周维护的预聚合表；使用其四周保留窗口可
+            # 避免大范围扫描 public_matches 导致 Explorer 的 Query read timeout。
+            payload = self.explorer(self._recent_month_sql())
         except OpenDotaApiError:
             payload = self._load_cached_hero_stats()
             if payload is None:
                 raise
             self.used_cached_hero_stats = True
-            _log.warning("OpenDota heroStats 不可用，使用最近一次成功缓存")
+            _log.warning("OpenDota 月度英雄统计不可用，使用最近一次成功缓存")
 
         if not isinstance(payload, list):
-            raise OpenDotaApiError("OpenDota heroStats 返回格式错误")
+            raise OpenDotaApiError("OpenDota 月度英雄统计返回格式错误")
 
-        # heroStats 已按 1—8 段位预聚合，在线生成时无需扫描并展开海量比赛。
-        stats = [self._parse_all_rank_stat(row) for row in payload]
+        stats = [self._parse_monthly_stat(row) for row in payload]
         if not self.used_cached_hero_stats:
             # 只有完整解析成功的数据才有资格替换最后成功缓存。
             self._save_hero_stats_cache(payload)
         eligible = [stat for stat in stats if stat.games >= min_games]
         eligible.sort(key=lambda stat: (-stat.win_rate, -stat.games, stat.hero_id))
         return eligible[:top_count]
+
+    def get_all_rank_win_rate_leaders(
+        self,
+        top_count: int = 10,
+        min_games: int = 100,
+    ) -> list[HeroWinRateStat]:
+        """兼容旧调用名称，统计口径已调整为 OpenDota 最近四个统计周。"""
+        return self.get_recent_month_win_rate_leaders(top_count, min_games)
+
+    @staticmethod
+    def _recent_month_sql() -> str:
+        return """
+WITH bounds AS (
+    SELECT FLOOR(EXTRACT(EPOCH FROM NOW()) / 604800)::int AS current_week
+), monthly AS (
+    SELECT
+        scenarios.hero_id,
+        SUM(scenarios.games)::bigint AS games,
+        SUM(scenarios.wins)::bigint AS wins
+    FROM scenarios
+    CROSS JOIN bounds
+    WHERE scenarios.item IS NULL
+      AND scenarios.epoch_week >= bounds.current_week - 3
+      AND scenarios.epoch_week <= bounds.current_week
+    GROUP BY scenarios.hero_id
+)
+SELECT monthly.hero_id, heroes.localized_name, monthly.games, monthly.wins
+FROM monthly
+JOIN heroes ON heroes.id = monthly.hero_id
+ORDER BY monthly.games DESC
+""".strip()
+
+    def _set_current_stats_period(self) -> None:
+        current_week = int(time.time() // SECONDS_PER_WEEK)
+        start_timestamp = (current_week - RETAINED_EPOCH_WEEKS + 1) * SECONDS_PER_WEEK
+        self.stats_period_start = datetime.fromtimestamp(
+            start_timestamp, tz=timezone.utc
+        ).date()
+        self.stats_period_end = datetime.now(tz=timezone.utc).date()
 
     def _get(self, path: str, params: dict[str, Any] | None = None) -> Any:
         for attempt in range(self.max_retries + 1):
@@ -136,7 +182,12 @@ class OpenDotaApiClient:
             self.cache_path.parent.mkdir(parents=True, exist_ok=True)
             temporary_path.write_text(
                 json.dumps(
-                    {"cached_at": time.time(), "data": payload},
+                    {
+                        "cached_at": time.time(),
+                        "period_start": self.stats_period_start.isoformat(),
+                        "period_end": self.stats_period_end.isoformat(),
+                        "data": payload,
+                    },
                     ensure_ascii=False,
                 ),
                 encoding="utf-8",
@@ -155,20 +206,20 @@ class OpenDotaApiClient:
             payload = cached["data"]
             if time.time() - cached_at > self.max_cache_age_seconds:
                 return None
+            self.stats_period_start = date.fromisoformat(cached["period_start"])
+            self.stats_period_end = date.fromisoformat(cached["period_end"])
             return payload if isinstance(payload, list) else None
         except (OSError, KeyError, TypeError, ValueError):
             return None
 
     @staticmethod
-    def _parse_all_rank_stat(row: dict[str, Any]) -> HeroWinRateStat:
+    def _parse_monthly_stat(row: dict[str, Any]) -> HeroWinRateStat:
         try:
-            games = sum(int(row.get(f"{rank}_pick", 0)) for rank in range(1, 9))
-            wins = sum(int(row.get(f"{rank}_win", 0)) for rank in range(1, 9))
             return HeroWinRateStat(
-                hero_id=int(row["id"]),
+                hero_id=int(row["hero_id"]),
                 hero_name=str(row["localized_name"]),
-                games=games,
-                wins=wins,
+                games=int(row["games"]),
+                wins=int(row["wins"]),
             )
         except (KeyError, TypeError, ValueError) as error:
             raise OpenDotaApiError(f"无法解析英雄胜率数据: {row}") from error

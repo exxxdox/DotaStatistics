@@ -40,9 +40,9 @@ def test_payloads_expose_supported_private_and_group_commands() -> None:
         "简报",
     }
     assert help_messages == {
-        "追踪术 昵称 dotaId",
-        "撒情况 昵称",
-        "今儿 昵称",
+        "追踪术",
+        "撒情况",
+        "今儿",
     }
     assert group_commands == {
         "追踪术",

@@ -3,7 +3,7 @@ from lib.open_dota_client import HeroWinRateStat, OpenDotaApiClient
 
 
 class HeroWinRateReportService:
-    """查询 OpenDota 全段位预聚合数据并生成英雄胜率榜。"""
+    """查询 OpenDota 最近四个统计周并生成英雄胜率榜。"""
 
     def __init__(
         self,
@@ -16,14 +16,21 @@ class HeroWinRateReportService:
         self.min_games = min_games
 
     def build(self) -> str:
-        stats = self.api_client.get_all_rank_win_rate_leaders(
+        stats = self.api_client.get_recent_month_win_rate_leaders(
             top_count=10,
             min_games=self.min_games,
         )
 
+        period_start = getattr(self.api_client, "stats_period_start", None)
+        period_end = getattr(self.api_client, "stats_period_end", None)
+        period = (
+            f"{period_start:%Y-%m-%d} 至 {period_end:%Y-%m-%d}"
+            if period_start and period_end
+            else "最近四个统计周"
+        )
         lines = [
-            "当前全分段英雄胜率 Top 10",
-            f"口径：全段位天梯公开比赛；至少 {self.min_games} 场。",
+            "最近一个月全分段英雄胜率 Top 10",
+            f"统计：{period}（当前周及前三周）；至少 {self.min_games} 场。",
         ]
         if getattr(self.api_client, "used_cached_hero_stats", False):
             lines.append("提示：OpenDota 暂不可用，当前展示最近一次成功缓存。")

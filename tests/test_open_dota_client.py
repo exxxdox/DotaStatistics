@@ -11,42 +11,49 @@ from lib.open_dota_client import OpenDotaApiClient, OpenDotaApiError
 class StubOpenDotaClient(OpenDotaApiClient):
     def __init__(self, rows: list[dict[str, Any]]) -> None:
         self.rows = rows
-        self.last_path = ""
+        self.last_sql = ""
         self.cache_path = None
         self.used_cached_hero_stats = False
 
-    def _get(self, path: str, params=None):
-        self.last_path = path
+    def explorer(self, sql: str):
+        self.last_sql = sql
         return self.rows
 
 
-def test_all_rank_leaders_build_bounded_query_and_parse_rows() -> None:
+def test_monthly_leaders_query_complete_weeks_and_parse_rows() -> None:
     client = StubOpenDotaClient(
         [
             {
-                "id": "1",
+                "hero_id": "1",
                 "localized_name": "Anti-Mage",
-                **{f"{rank}_pick": 25 for rank in range(1, 9)},
-                **{f"{rank}_win": 15 for rank in range(1, 9)},
+                "games": "200",
+                "wins": "120",
             }
         ]
     )
 
-    stats = client.get_all_rank_win_rate_leaders(top_count=10, min_games=100)
+    stats = client.get_recent_month_win_rate_leaders(top_count=10, min_games=100)
 
     assert stats[0].win_rate == 0.6
     assert stats[0].games == 200
-    assert client.last_path == "/heroStats"
+    assert "FROM scenarios" in client.last_sql
+    assert "scenarios.item IS NULL" in client.last_sql
+    assert "bounds.current_week - 3" in client.last_sql
+    assert "scenarios.epoch_week <= bounds.current_week" in client.last_sql
+    assert client.stats_period_start is not None
+    assert client.stats_period_end is not None
+    period_days = (client.stats_period_end - client.stats_period_start).days
+    assert 21 <= period_days <= 27
 
 
 def test_all_rank_leaders_reject_invalid_limits() -> None:
     with pytest.raises(ValueError):
-        StubOpenDotaClient([]).get_all_rank_win_rate_leaders(top_count=0)
+        StubOpenDotaClient([]).get_recent_month_win_rate_leaders(top_count=0)
 
 
 def test_all_rank_leaders_reject_invalid_rows() -> None:
     with pytest.raises(OpenDotaApiError):
-        StubOpenDotaClient([{"id": "bad"}]).get_all_rank_win_rate_leaders()
+        StubOpenDotaClient([{"hero_id": "bad"}]).get_recent_month_win_rate_leaders()
 
 
 class FakeResponse:
@@ -98,27 +105,29 @@ def test_get_retries_522_before_succeeding() -> None:
 def test_hero_stats_falls_back_to_recent_cache() -> None:
     payload = [
         {
-            "id": 1,
+            "hero_id": 1,
             "localized_name": "Anti-Mage",
-            **{f"{rank}_pick": 25 for rank in range(1, 9)},
-            **{f"{rank}_win": 15 for rank in range(1, 9)},
+            "games": 200,
+            "wins": 120,
         }
     ]
     cache_path = Path(__file__).parent / ".hero_stats_cache_test.json"
     try:
         live_client = OpenDotaApiClient(
-            session=FakeSession([FakeResponse(200, payload)]),
+            session=FakeSession(
+                [FakeResponse(200, {"rows": payload, "err": None})]
+            ),
             max_retries=0,
             cache_path=cache_path,
         )
-        live_client.get_all_rank_win_rate_leaders()
+        live_client.get_recent_month_win_rate_leaders()
 
         cached_client = OpenDotaApiClient(
             session=FakeSession([FakeResponse(522)]),
             max_retries=0,
             cache_path=cache_path,
         )
-        stats = cached_client.get_all_rank_win_rate_leaders()
+        stats = cached_client.get_recent_month_win_rate_leaders()
 
         assert stats[0].hero_name == "Anti-Mage"
         assert cached_client.used_cached_hero_stats is True
