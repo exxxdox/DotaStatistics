@@ -98,116 +98,44 @@ def test_group_openid_command_requires_group_context() -> None:
     assert build_router().dispatch("查看当前群OpenID") == "当前消息不包含群 OpenID。"
 
 
-def test_hero_win_rate_report_is_scheduled_at_20_00() -> None:
-    async def create_client() -> MyClient:
-        # botpy 需要运行中的事件循环；测试只检查配置，不启动网络连接。
-        return MyClient(
-            intents=botpy.Intents(public_messages=True),
-            router=build_router(),
-            report_group_openid="group-id",
-            ext_handlers=False,
-        )
-
-    client = asyncio.run(create_client())
-
-    job = client.scheduler.get_job("hero-win-rate-report")
-
-    assert job is not None
-    assert str(job.trigger) == "cron[hour='20', minute='0']"
-
-
-def test_manual_report_uses_scheduled_target_and_sender() -> None:
+def test_group_hero_report_replies_to_current_request() -> None:
     class FakeWeeklyReport:
         def build(self) -> str:
-            return "测试榜单正文"
-
-    class FakeApi:
-        def __init__(self) -> None:
-            self.calls: list[dict[str, object]] = []
-
-        async def post_group_message(self, **kwargs):
-            self.calls.append(kwargs)
-            return SimpleNamespace(id="sent-message-id")
+            return "当前英雄胜率榜"
 
     class FakeMessage:
-        content = "测试英雄胜率榜"
-        group_openid = "command-source-group"
+        group_openid = "current-group"
 
-        def __init__(self) -> None:
+        def __init__(self, content: str) -> None:
+            self.content = content
             self.replies: list[dict[str, object]] = []
 
         async def reply(self, **kwargs):
             self.replies.append(kwargs)
             return SimpleNamespace(id="reply-message-id")
 
-    async def run_manual_test() -> tuple[FakeApi, FakeMessage]:
+    async def run_requests() -> list[FakeMessage]:
         client = MyClient(
             intents=botpy.Intents(public_messages=True),
             router=build_router(),
-            report_group_openid="scheduled-target-group",
             hero_win_rate_report=FakeWeeklyReport(),
             ext_handlers=False,
         )
-        fake_api = FakeApi()
-        client.api = fake_api
-        message = FakeMessage()
-        await client.on_group_at_message_create(message)
-        return fake_api, message
+        messages = [
+            FakeMessage("/高胜率英雄"),
+            # 兼容 QQ 客户端短期缓存的旧指令面板按钮。
+            FakeMessage("/测试胜率榜"),
+        ]
+        for message in messages:
+            await client.on_group_at_message_create(message)
+        return messages
 
-    fake_api, message = asyncio.run(run_manual_test())
+    messages = asyncio.run(run_requests())
 
-    assert fake_api.calls == [
-        {
-            "group_openid": "scheduled-target-group",
-            "msg_type": 0,
-            "content": "测试榜单正文",
-        }
+    assert [message.replies for message in messages] == [
+        [{"msg_type": 0, "content": "当前英雄胜率榜"}],
+        [{"msg_type": 0, "content": "当前英雄胜率榜"}],
     ]
-    assert message.replies[0]["content"] == "测试榜单已发送到定时任务目标群。"
-
-
-def test_slash_prefixed_manual_report_uses_scheduled_sender() -> None:
-    class FakeWeeklyReport:
-        def build(self) -> str:
-            return "测试榜单正文"
-
-    class FakeApi:
-        def __init__(self) -> None:
-            self.calls: list[dict[str, object]] = []
-
-        async def post_group_message(self, **kwargs):
-            self.calls.append(kwargs)
-            return SimpleNamespace(id="sent-message-id")
-
-    class FakeMessage:
-        content = "/测试胜率榜"
-        group_openid = "command-source-group"
-
-        def __init__(self) -> None:
-            self.replies: list[dict[str, object]] = []
-
-        async def reply(self, **kwargs):
-            self.replies.append(kwargs)
-            return SimpleNamespace(id="reply-message-id")
-
-    async def run_manual_test() -> tuple[FakeApi, FakeMessage]:
-        client = MyClient(
-            intents=botpy.Intents(public_messages=True),
-            router=build_router(),
-            report_group_openid="scheduled-target-group",
-            hero_win_rate_report=FakeWeeklyReport(),
-            ext_handlers=False,
-        )
-        fake_api = FakeApi()
-        client.api = fake_api
-        message = FakeMessage()
-        await client.on_group_at_message_create(message)
-        return fake_api, message
-
-    fake_api, message = asyncio.run(run_manual_test())
-
-    assert fake_api.calls[0]["group_openid"] == "scheduled-target-group"
-    assert message.replies[0]["content"] == "测试榜单已发送到定时任务目标群。"
 
 
 def test_private_message_uses_deepseek_and_c2c_reply() -> None:

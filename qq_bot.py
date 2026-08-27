@@ -5,7 +5,6 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 import botpy
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from botpy.message import C2CMessage, GroupMessage
 
 from data_center import _log, enable_ai, name_id_ref
@@ -119,7 +118,7 @@ class CommandRouter:
             "@我 今儿 昵称\n"
             "@我 简报\n"
             "@我 查看当前群OpenID\n"
-            "@我 测试英雄胜率榜\n"
+            "@我 高胜率英雄\n"
             "或者单纯地@我随便聊聊\n"
             f"斗兽场中的选手是: {players}"
         )
@@ -188,14 +187,12 @@ class MyClient(botpy.Client):
         self,
         *args,
         router: CommandRouter,
-        report_group_openid: str | None = None,
         hero_win_rate_report: HeroWinRateReportService | None = None,
         command_discovery: QQCommandDiscoveryService | None = None,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
         self.router = router
-        self.report_group_openid = report_group_openid
         self.hero_win_rate_report = hero_win_rate_report or HeroWinRateReportService(
             hero_name_resolver=getHeroName
         )
@@ -203,16 +200,6 @@ class MyClient(botpy.Client):
             self.api._http.request
         )
         self._command_discovery_configured = False
-        self.scheduler = AsyncIOScheduler(timezone="Asia/Shanghai")
-        # 固定任务 ID 配合 replace_existing，避免网关重连后重复发送。
-        self.scheduler.add_job(
-            self._send_hero_win_rate_report,
-            trigger="cron",
-            hour=20,
-            minute=0,
-            id="hero-win-rate-report",
-            replace_existing=True,
-        )
 
     async def on_ready(self) -> None:
         _log.info(f"robot 「{self.robot.name}」 on_ready!")
@@ -222,25 +209,19 @@ class MyClient(botpy.Client):
                 self._command_discovery_configured = True
                 _log.info("单聊自定义菜单和群聊指令面板配置成功")
             except Exception:
-                # 菜单配置失败不应阻断机器人收发消息和定时任务。
+                # 菜单配置失败不应阻断机器人正常收发消息。
                 _log.exception("配置 QQ 自定义菜单或指令面板失败")
-        if not self.report_group_openid:
-            _log.warning("未配置 QQBOT_GROUP_OPENID，晚八点英雄胜率榜不会发送")
-        elif not self.scheduler.running:
-            self.scheduler.start()
-            _log.info("已启动每日 20:00 英雄胜率榜任务")
 
     async def on_group_at_message_create(self, message: GroupMessage):
         try:
             normalized_content = normalize_command_content(message.content)
-            if normalized_content in {"测试英雄胜率榜", "测试胜率榜"}:
-                # 手动测试复用定时任务的主动发送方法和目标群，不走当前消息回复通道。
-                sent = await self._send_hero_win_rate_report()
-                reply = (
-                    "测试榜单已发送到定时任务目标群。"
-                    if sent
-                    else "测试榜单发送失败，请检查配置和服务日志。"
-                )
+            if normalized_content in {
+                PRIVATE_HERO_REPORT_COMMAND,
+                "测试英雄胜率榜",
+                "测试胜率榜",
+            }:
+                # 旧指令面板可能短期缓存“测试胜率榜”，统一改为回复当前请求。
+                reply = await asyncio.to_thread(self.hero_win_rate_report.build)
             else:
                 # 查询接口和 AI SDK 都是同步调用，移出事件循环以免阻塞其他消息。
                 context = CommandContext(group_openid=message.group_openid)
@@ -261,8 +242,9 @@ class MyClient(botpy.Client):
     async def on_c2c_message_create(self, message: C2CMessage) -> None:
         """将 QQ 私聊消息交给 DeepSeek，并使用原消息的 C2C 通道回复。"""
         try:
-            if message.content.strip() == PRIVATE_HERO_REPORT_COMMAND:
-                # 私聊榜单直接回复请求人，不复用定时任务的目标群发送通道。
+            normalized_content = normalize_command_content(message.content)
+            if normalized_content == PRIVATE_HERO_REPORT_COMMAND:
+                # 英雄榜只在用户主动请求时生成，并直接回复当前会话。
                 reply = await asyncio.to_thread(self.hero_win_rate_report.build)
             else:
                 user_openid = getattr(message.author, "user_openid", None)
@@ -280,32 +262,6 @@ class MyClient(botpy.Client):
         result = await message.reply(msg_type=0, content=reply)
         _log.info(f"私聊消息回复成功: message_id={getattr(result, 'id', None)}")
 
-    async def _send_hero_win_rate_report(self) -> bool:
-        if not self.report_group_openid:
-            _log.warning("未配置 QQBOT_GROUP_OPENID，无法发送英雄胜率榜")
-            return False
-        try:
-            # OpenDota Explorer 是同步 HTTP 请求，避免阻塞 QQ SDK 的事件循环。
-            content = await asyncio.to_thread(self.hero_win_rate_report.build)
-            result = await self.api.post_group_message(
-                group_openid=self.report_group_openid,
-                msg_type=0,
-                content=content,
-            )
-            _log.info(
-                f"英雄胜率榜发送成功: message_id={getattr(result, 'id', None)}"
-            )
-            return True
-        except Exception:
-            _log.exception("英雄胜率榜生成或发送失败")
-            return False
-
-    async def close(self) -> None:
-        if self.scheduler.running:
-            # shutdown 本身不是协程；不等待长任务，保证机器人可以快速退出。
-            self.scheduler.shutdown(wait=False)
-        await super().close()
-
 
 def start() -> None:
     """创建并启动 QQ 机器人客户端。"""
@@ -318,7 +274,6 @@ def start() -> None:
     client = MyClient(
         intents=intents,
         router=CommandRouter(),
-        report_group_openid=os.environ.get("QQBOT_GROUP_OPENID"),
     )
     client.run(appid=app_id, secret=app_secret)
 

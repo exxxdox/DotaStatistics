@@ -50,7 +50,7 @@ def test_payloads_expose_supported_private_and_group_commands() -> None:
         "今儿",
         "简报",
         "群OpenID",
-        "测试胜率榜",
+        "高胜率英雄",
     }
 
 

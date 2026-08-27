@@ -101,7 +101,7 @@ class OpenDotaApiClient:
         if self.refresh_workers < 1:
             raise ValueError("refresh_workers 必须大于 0")
 
-        # 同一个机器人实例可能同时收到手动命令和定时任务；串行刷新可避免
+        # 同一个机器人实例可能同时收到多个查询；串行刷新可避免
         # 两批日查询重复消耗配额或互相覆盖缓存文件。
         with self._cache_lock:
             stats = self._load_or_refresh_monthly_stats()

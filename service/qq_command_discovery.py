@@ -87,8 +87,8 @@ def build_group_panel() -> dict[str, Any]:
             },
             {
                 "type": "command",
-                "name": "测试胜率榜",
-                "desc": "测试定时英雄榜单",
+                "name": "高胜率英雄",
+                "desc": "查询近期英雄胜率榜",
                 "only_admin": False,
             },
         ],
