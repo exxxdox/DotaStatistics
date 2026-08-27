@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 import botpy
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from botpy.message import GroupMessage
+from botpy.message import C2CMessage, GroupMessage
 
 from data_center import _log, enable_ai, name_id_ref
 from lib.deepseekapi import deepseekGeneral
@@ -16,6 +16,7 @@ from service.today import todayAnalyze
 from service.weekly_hero_report import WeeklyHeroReportService
 
 CommandHandler = Callable[[list[str]], str]
+PRIVATE_HERO_REPORT_COMMAND = "高胜率英雄"
 
 
 @dataclass(frozen=True)
@@ -34,7 +35,7 @@ class BotServices:
     get_recent_matches: Callable[[int], str | None] = getRecentMatchesApi
     get_player_wl: Callable[[int, int], tuple[int, int] | None] = getPlayerWL
     get_today_report: Callable[[], str] = todayAnalyze
-    chat: Callable[[str], str] = deepseekGeneral
+    chat: Callable[[str, str], str] = deepseekGeneral
 
 
 class CommandRouter:
@@ -66,7 +67,20 @@ class CommandRouter:
         handler = self._commands.get(words[0])
         if handler is not None:
             return handler(words[1:])
-        return self.services.chat(content) if self.ai_enabled else "听不懂。"
+        conversation_id = (
+            f"group:{context.group_openid}"
+            if context is not None and context.group_openid
+            else "default"
+        )
+        return self.chat(content, conversation_id)
+
+    def chat(self, content: str, conversation_id: str) -> str:
+        """直接处理 AI 对话，不让私聊内容误入群命令路由。"""
+        return (
+            self.services.chat(content, conversation_id)
+            if self.ai_enabled
+            else "听不懂。"
+        )
 
     def _show_group_openid(
         self, args: list[str], context: CommandContext | None
@@ -204,6 +218,26 @@ class MyClient(botpy.Client):
         )
         # 只记录消息 ID，避免回复正文中的群 OpenID 进入普通运行日志。
         _log.info(f"群消息回复成功: message_id={getattr(result, 'id', None)}")
+
+    async def on_c2c_message_create(self, message: C2CMessage) -> None:
+        """将 QQ 私聊消息交给 DeepSeek，并使用原消息的 C2C 通道回复。"""
+        try:
+            if message.content.strip() == PRIVATE_HERO_REPORT_COMMAND:
+                # 私聊榜单直接回复请求人，不复用定时任务的目标群发送通道。
+                reply = await asyncio.to_thread(self.weekly_report.build)
+            else:
+                user_openid = getattr(message.author, "user_openid", None)
+                # OpenID 只用于本地隔离上下文，不写日志也不发送给模型。
+                conversation_id = f"c2c:{user_openid or message.id}"
+                reply = await asyncio.to_thread(
+                    self.router.chat, message.content, conversation_id
+                )
+        except Exception:
+            _log.exception("处理私聊消息失败")
+            reply = "处理失败了，稍后再试。"
+
+        result = await message.reply(msg_type=0, content=reply)
+        _log.info(f"私聊消息回复成功: message_id={getattr(result, 'id', None)}")
 
     async def _send_weekly_hero_report(self) -> bool:
         if not self.report_group_openid:

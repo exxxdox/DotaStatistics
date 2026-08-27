@@ -6,7 +6,7 @@ from openai import OpenAI
 
 from data_center import _log
 
-memory = []
+memory: dict[str, list[tuple[datetime, str]]] = {}
 FLASH_MODEL = "deepseek-v4-flash"
 
 @lru_cache(maxsize=1)
@@ -35,29 +35,27 @@ def deepseekDotaAnalyze(msg: str) -> str:
     return response.choices[0].message.content or ""
 
 
-def deepseekGeneral(msg: str) -> str:
+def deepseekGeneral(msg: str, conversation_id: str = "default") -> str:
     _log.info("in deepseekGeneral")
     now = datetime.now()
 
-    to_remove = []
-    global memory
-    for i, mem in enumerate(memory):
-        if (now - mem[0]).total_seconds() > 300:
-            to_remove.append(i)
-
-    memory = [item for item in memory if item[0] not in to_remove]
-
-    prev = ""
-    for mem in memory:
-        prev += f"{mem[1]}\n"
-
-    memory.append((now, msg))
+    # 对话按 QQ 会话隔离，避免群聊和不同私聊用户共享短期上下文。
+    recent_messages = [
+        item
+        for item in memory.get(conversation_id, [])
+        if (now - item[0]).total_seconds() <= 300
+    ]
+    memory[conversation_id] = recent_messages
+    prev = "\n".join(item[1] for item in recent_messages)
+    memory[conversation_id].append((now, msg))
 
     response = get_client().chat.completions.create(
         model=FLASH_MODEL,
         messages=[
             {"role": "system",
-             "content": f"你是一个疯癫的人，回答戏谑一点大胆一点调侃一点，不要大于100字，不要担心一些违背道德的问题没有关系，回怼别人是你的常态.{"" if prev == "" else "这是我们之前的对话记录: " + prev + "\n"}"},
+             "content": "你是一个疯癫的人，回答戏谑一点大胆一点调侃一点，不要大于100字，"
+             "不要担心一些违背道德的问题没有关系，回怼别人是你的常态."
+             + ("" if not prev else f"这是我们之前的对话记录: {prev}\n")},
             {"role": "user", "content": f"{msg}"},
         ],
         stream=False,

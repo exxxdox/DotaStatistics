@@ -36,3 +36,15 @@ def test_general_chat_uses_flash_without_thinking(monkeypatch) -> None:
     assert arguments["model"] == "deepseek-v4-flash"
     assert "reasoning_effort" not in arguments
     assert arguments["extra_body"] == {"thinking": {"type": "disabled"}}
+
+
+def test_general_chat_memory_is_isolated_by_conversation(monkeypatch) -> None:
+    client = build_client()
+    monkeypatch.setattr(deepseekapi, "get_client", lambda: client)
+    deepseekapi.memory.clear()
+
+    deepseekapi.deepseekGeneral("用户甲的私密内容", "c2c:user-a")
+    deepseekapi.deepseekGeneral("用户乙的问题", "c2c:user-b")
+
+    second_messages = client.chat.completions.create.call_args.kwargs["messages"]
+    assert "用户甲的私密内容" not in second_messages[0]["content"]

@@ -14,7 +14,7 @@ def build_router(**overrides) -> CommandRouter:
         "get_recent_matches": lambda dota_id: f"比赛:{dota_id}",
         "get_player_wl": lambda _dota_id, _days: (2, 1),
         "get_today_report": lambda: "今日简报",
-        "chat": lambda message: f"AI:{message}",
+        "chat": lambda message, _conversation_id: f"AI:{message}",
     }
     defaults.update(overrides)
     return CommandRouter(BotServices(**defaults))
@@ -131,3 +131,82 @@ def test_manual_report_uses_scheduled_target_and_sender() -> None:
         }
     ]
     assert message.replies[0]["content"] == "测试榜单已发送到定时任务目标群。"
+
+
+def test_private_message_uses_deepseek_and_c2c_reply() -> None:
+    calls: list[tuple[str, str]] = []
+
+    class FakeMessage:
+        content = "私聊你好"
+        id = "incoming-message-id"
+        author = SimpleNamespace(user_openid="user-openid")
+
+        def __init__(self) -> None:
+            self.replies: list[dict[str, object]] = []
+
+        async def reply(self, **kwargs):
+            self.replies.append(kwargs)
+            return SimpleNamespace(id="reply-message-id")
+
+    async def run_private_message() -> FakeMessage:
+        router = build_router(
+            chat=lambda message, conversation_id: (
+                calls.append((message, conversation_id)) or f"AI:{message}"
+            )
+        )
+        client = MyClient(
+            intents=botpy.Intents(public_messages=True),
+            router=router,
+            ext_handlers=False,
+        )
+        message = FakeMessage()
+        await client.on_c2c_message_create(message)
+        return message
+
+    message = asyncio.run(run_private_message())
+
+    assert calls == [("私聊你好", "c2c:user-openid")]
+    assert message.replies == [{"msg_type": 0, "content": "AI:私聊你好"}]
+
+
+def test_private_hero_report_keyword_replies_to_requester() -> None:
+    ai_calls: list[tuple[str, str]] = []
+
+    class FakeWeeklyReport:
+        def build(self) -> str:
+            return "上周五位置英雄胜率榜"
+
+    class FakeMessage:
+        content = "  高胜率英雄  "
+        id = "incoming-message-id"
+        author = SimpleNamespace(user_openid="user-openid")
+
+        def __init__(self) -> None:
+            self.replies: list[dict[str, object]] = []
+
+        async def reply(self, **kwargs):
+            self.replies.append(kwargs)
+            return SimpleNamespace(id="reply-message-id")
+
+    async def run_private_report() -> FakeMessage:
+        router = build_router(
+            chat=lambda message, conversation_id: ai_calls.append(
+                (message, conversation_id)
+            )
+        )
+        client = MyClient(
+            intents=botpy.Intents(public_messages=True),
+            router=router,
+            weekly_report=FakeWeeklyReport(),
+            ext_handlers=False,
+        )
+        message = FakeMessage()
+        await client.on_c2c_message_create(message)
+        return message
+
+    message = asyncio.run(run_private_report())
+
+    assert ai_calls == []
+    assert message.replies == [
+        {"msg_type": 0, "content": "上周五位置英雄胜率榜"}
+    ]
