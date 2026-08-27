@@ -14,7 +14,7 @@ from lib.open_dota_api import getPlayerWL, getRecentMatchesApi
 from lib.utils import SetDotaId, getDotaId, getHeroName
 from service.qq_command_discovery import QQCommandDiscoveryService
 from service.today import todayAnalyze
-from service.weekly_hero_report import WeeklyHeroReportService
+from service.weekly_hero_report import HeroWinRateReportService
 
 CommandHandler = Callable[[list[str]], str]
 PRIVATE_HERO_REPORT_COMMAND = "高胜率英雄"
@@ -173,14 +173,14 @@ class MyClient(botpy.Client):
         *args,
         router: CommandRouter,
         report_group_openid: str | None = None,
-        weekly_report: WeeklyHeroReportService | None = None,
+        hero_win_rate_report: HeroWinRateReportService | None = None,
         command_discovery: QQCommandDiscoveryService | None = None,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
         self.router = router
         self.report_group_openid = report_group_openid
-        self.weekly_report = weekly_report or WeeklyHeroReportService(
+        self.hero_win_rate_report = hero_win_rate_report or HeroWinRateReportService(
             hero_name_resolver=getHeroName
         )
         self.command_discovery = command_discovery or QQCommandDiscoveryService(
@@ -190,11 +190,11 @@ class MyClient(botpy.Client):
         self.scheduler = AsyncIOScheduler(timezone="Asia/Shanghai")
         # 固定任务 ID 配合 replace_existing，避免网关重连后重复发送。
         self.scheduler.add_job(
-            self._send_weekly_hero_report,
+            self._send_hero_win_rate_report,
             trigger="cron",
             hour=20,
             minute=0,
-            id="weekly-hero-win-rate-report",
+            id="hero-win-rate-report",
             replace_existing=True,
         )
 
@@ -218,7 +218,7 @@ class MyClient(botpy.Client):
         try:
             if message.content.strip() in {"测试英雄胜率榜", "测试胜率榜"}:
                 # 手动测试复用定时任务的主动发送方法和目标群，不走当前消息回复通道。
-                sent = await self._send_weekly_hero_report()
+                sent = await self._send_hero_win_rate_report()
                 reply = (
                     "测试榜单已发送到定时任务目标群。"
                     if sent
@@ -246,7 +246,7 @@ class MyClient(botpy.Client):
         try:
             if message.content.strip() == PRIVATE_HERO_REPORT_COMMAND:
                 # 私聊榜单直接回复请求人，不复用定时任务的目标群发送通道。
-                reply = await asyncio.to_thread(self.weekly_report.build)
+                reply = await asyncio.to_thread(self.hero_win_rate_report.build)
             else:
                 user_openid = getattr(message.author, "user_openid", None)
                 # OpenID 只用于本地隔离上下文，不写日志也不发送给模型。
@@ -263,24 +263,24 @@ class MyClient(botpy.Client):
         result = await message.reply(msg_type=0, content=reply)
         _log.info(f"私聊消息回复成功: message_id={getattr(result, 'id', None)}")
 
-    async def _send_weekly_hero_report(self) -> bool:
+    async def _send_hero_win_rate_report(self) -> bool:
         if not self.report_group_openid:
             _log.warning("未配置 QQBOT_GROUP_OPENID，无法发送英雄胜率榜")
             return False
         try:
             # OpenDota Explorer 是同步 HTTP 请求，避免阻塞 QQ SDK 的事件循环。
-            content = await asyncio.to_thread(self.weekly_report.build)
+            content = await asyncio.to_thread(self.hero_win_rate_report.build)
             result = await self.api.post_group_message(
                 group_openid=self.report_group_openid,
                 msg_type=0,
                 content=content,
             )
             _log.info(
-                f"上周英雄胜率榜发送成功: message_id={getattr(result, 'id', None)}"
+                f"英雄胜率榜发送成功: message_id={getattr(result, 'id', None)}"
             )
             return True
         except Exception:
-            _log.exception("上周英雄胜率榜生成或发送失败")
+            _log.exception("英雄胜率榜生成或发送失败")
             return False
 
     async def close(self) -> None:

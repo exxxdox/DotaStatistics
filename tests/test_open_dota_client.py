@@ -8,34 +8,37 @@ from lib.open_dota_client import OpenDotaApiClient, OpenDotaApiError
 class StubOpenDotaClient(OpenDotaApiClient):
     def __init__(self, rows: list[dict[str, Any]]) -> None:
         self.rows = rows
-        self.last_sql = ""
+        self.last_path = ""
 
-    def explorer(self, sql: str) -> list[dict[str, Any]]:
-        self.last_sql = sql
+    def _get(self, path: str, params=None):
+        self.last_path = path
         return self.rows
 
 
-def test_position_leaders_build_bounded_query_and_parse_rows() -> None:
+def test_all_rank_leaders_build_bounded_query_and_parse_rows() -> None:
     client = StubOpenDotaClient(
-        [{"position": "1", "hero_id": "1", "hero_name": "Anti-Mage", "games": "20", "wins": "12"}]
+        [
+            {
+                "id": "1",
+                "localized_name": "Anti-Mage",
+                **{f"{rank}_pick": 25 for rank in range(1, 9)},
+                **{f"{rank}_win": 15 for rank in range(1, 9)},
+            }
+        ]
     )
 
-    stats = client.get_position_win_rate_leaders(100, 200, top_count=3, min_games=10)
+    stats = client.get_all_rank_win_rate_leaders(top_count=10, min_games=100)
 
     assert stats[0].win_rate == 0.6
-    assert "m.start_time >= 100" in client.last_sql
-    assert "m.start_time < 200" in client.last_sql
-    assert "m.game_mode = 2" in client.last_sql
-    assert "m.lobby_type = 1" in client.last_sql
-    assert "HAVING COUNT(*) >= 10" in client.last_sql
-    assert "hero_rank <= 3" in client.last_sql
+    assert stats[0].games == 200
+    assert client.last_path == "/heroStats"
 
 
-def test_position_leaders_reject_invalid_range() -> None:
+def test_all_rank_leaders_reject_invalid_limits() -> None:
     with pytest.raises(ValueError):
-        StubOpenDotaClient([]).get_position_win_rate_leaders(200, 100)
+        StubOpenDotaClient([]).get_all_rank_win_rate_leaders(top_count=0)
 
 
-def test_position_leaders_reject_invalid_rows() -> None:
+def test_all_rank_leaders_reject_invalid_rows() -> None:
     with pytest.raises(OpenDotaApiError):
-        StubOpenDotaClient([{"position": "bad"}]).get_position_win_rate_leaders(100, 200)
+        StubOpenDotaClient([{"id": "bad"}]).get_all_rank_win_rate_leaders()

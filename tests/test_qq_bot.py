@@ -73,7 +73,7 @@ def test_group_openid_command_requires_group_context() -> None:
     assert build_router().dispatch("查看当前群OpenID") == "当前消息不包含群 OpenID。"
 
 
-def test_weekly_report_is_scheduled_at_20_00() -> None:
+def test_hero_win_rate_report_is_scheduled_at_20_00() -> None:
     async def create_client() -> MyClient:
         # botpy 需要运行中的事件循环；测试只检查配置，不启动网络连接。
         return MyClient(
@@ -85,7 +85,7 @@ def test_weekly_report_is_scheduled_at_20_00() -> None:
 
     client = asyncio.run(create_client())
 
-    job = client.scheduler.get_job("weekly-hero-win-rate-report")
+    job = client.scheduler.get_job("hero-win-rate-report")
 
     assert job is not None
     assert str(job.trigger) == "cron[hour='20', minute='0']"
@@ -120,7 +120,7 @@ def test_manual_report_uses_scheduled_target_and_sender() -> None:
             intents=botpy.Intents(public_messages=True),
             router=build_router(),
             report_group_openid="scheduled-target-group",
-            weekly_report=FakeWeeklyReport(),
+            hero_win_rate_report=FakeWeeklyReport(),
             ext_handlers=False,
         )
         fake_api = FakeApi()
@@ -182,7 +182,7 @@ def test_private_hero_report_keyword_replies_to_requester() -> None:
 
     class FakeWeeklyReport:
         def build(self) -> str:
-            return "上周五位置英雄胜率榜"
+            return "当前全分段英雄胜率 Top 10"
 
     class FakeMessage:
         content = "  高胜率英雄  "
@@ -205,7 +205,7 @@ def test_private_hero_report_keyword_replies_to_requester() -> None:
         client = MyClient(
             intents=botpy.Intents(public_messages=True),
             router=router,
-            weekly_report=FakeWeeklyReport(),
+            hero_win_rate_report=FakeWeeklyReport(),
             ext_handlers=False,
         )
         message = FakeMessage()
@@ -216,7 +216,7 @@ def test_private_hero_report_keyword_replies_to_requester() -> None:
 
     assert ai_calls == []
     assert message.replies == [
-        {"msg_type": 0, "content": "上周五位置英雄胜率榜"}
+        {"msg_type": 0, "content": "当前全分段英雄胜率 Top 10"}
     ]
 
 

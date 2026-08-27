@@ -14,24 +14,30 @@ def build_private_menu() -> dict[str, Any]:
         "menu": {
             "items": [
                 {
+                    "name": "help",
+                    "type": "menu",
+                    "sub_menu_items": [
+                        {
+                            "name": "追踪术",
+                            "type": "send_message",
+                            "send_message": "追踪术 昵称 dotaId",
+                        },
+                        {
+                            "name": "撒情况",
+                            "type": "send_message",
+                            "send_message": "撒情况 昵称",
+                        },
+                        {
+                            "name": "今儿",
+                            "type": "send_message",
+                            "send_message": "今儿 昵称",
+                        },
+                    ],
+                },
+                {
                     "name": "英雄胜率",
                     "type": "send_message",
                     "send_message": "高胜率英雄",
-                },
-                {
-                    "name": "追踪选手",
-                    "type": "send_message",
-                    "send_message": "追踪术 昵称 dotaId",
-                },
-                {
-                    "name": "近期比赛",
-                    "type": "send_message",
-                    "send_message": "撒情况 昵称",
-                },
-                {
-                    "name": "今日战绩",
-                    "type": "send_message",
-                    "send_message": "今儿 昵称",
                 },
                 {
                     "name": "今日简报",

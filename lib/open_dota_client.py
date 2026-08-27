@@ -10,8 +10,7 @@ class OpenDotaApiError(RuntimeError):
 
 
 @dataclass(frozen=True)
-class HeroPositionStat:
-    position: int
+class HeroWinRateStat:
     hero_id: int
     hero_name: str
     games: int
@@ -54,71 +53,23 @@ class OpenDotaApiClient:
             raise OpenDotaApiError("OpenDota explorer 响应缺少 rows")
         return rows
 
-    def get_position_win_rate_leaders(
+    def get_all_rank_win_rate_leaders(
         self,
-        start_timestamp: int,
-        end_timestamp: int,
-        top_count: int = 3,
-        min_games: int = 3,
-    ) -> list[HeroPositionStat]:
-        if start_timestamp >= end_timestamp:
-            raise ValueError("统计开始时间必须早于结束时间")
+        top_count: int = 10,
+        min_games: int = 100,
+    ) -> list[HeroWinRateStat]:
         if top_count < 1 or min_games < 1:
             raise ValueError("top_count 和 min_games 必须大于 0")
 
-        # OpenDota 没有 1-5 号位字段；按同队 GPM 排名还原经济优先级。
-        # Explorer 的近期样本是职业比赛，因此限定队长模式并排除残缺数据。
-        sql = f"""
-WITH eligible_matches AS (
-    SELECT m.match_id, m.radiant_win
-    FROM matches AS m
-    JOIN player_matches AS pm USING (match_id)
-    WHERE m.start_time >= {int(start_timestamp)}
-      AND m.start_time < {int(end_timestamp)}
-      AND m.game_mode = 2
-      AND m.lobby_type = 1
-    GROUP BY m.match_id, m.radiant_win
-    HAVING COUNT(*) = 10
-       AND COUNT(pm.gold_per_min) = 10
-       AND BOOL_AND(COALESCE(pm.leaver_status, 0) = 0)
-), positioned_players AS (
-    SELECT
-        pm.hero_id,
-        h.localized_name AS hero_name,
-        ROW_NUMBER() OVER (
-            PARTITION BY pm.match_id, (pm.player_slot < 128)
-            ORDER BY pm.gold_per_min DESC, pm.player_slot
-        ) AS position,
-        ((pm.player_slot < 128) = em.radiant_win) AS won
-    FROM player_matches AS pm
-    JOIN eligible_matches AS em USING (match_id)
-    JOIN heroes AS h ON h.id = pm.hero_id
-), aggregated AS (
-    SELECT
-        position,
-        hero_id,
-        hero_name,
-        COUNT(*) AS games,
-        COUNT(*) FILTER (WHERE won) AS wins
-    FROM positioned_players
-    GROUP BY position, hero_id, hero_name
-    HAVING COUNT(*) >= {int(min_games)}
-), ranked AS (
-    SELECT
-        *,
-        ROW_NUMBER() OVER (
-            PARTITION BY position
-            ORDER BY wins::numeric / games DESC, games DESC, hero_id
-        ) AS hero_rank
-    FROM aggregated
-)
-SELECT position, hero_id, hero_name, games, wins
-FROM ranked
-WHERE hero_rank <= {int(top_count)}
-ORDER BY position, hero_rank
-""".strip()
+        payload = self._get("/heroStats")
+        if not isinstance(payload, list):
+            raise OpenDotaApiError("OpenDota heroStats 返回格式错误")
 
-        return [self._parse_position_stat(row) for row in self.explorer(sql)]
+        # heroStats 已按 1—8 段位预聚合，在线生成时无需扫描并展开海量比赛。
+        stats = [self._parse_all_rank_stat(row) for row in payload]
+        eligible = [stat for stat in stats if stat.games >= min_games]
+        eligible.sort(key=lambda stat: (-stat.win_rate, -stat.games, stat.hero_id))
+        return eligible[:top_count]
 
     def _get(self, path: str, params: dict[str, Any] | None = None) -> Any:
         try:
@@ -131,14 +82,15 @@ ORDER BY position, hero_rank
             raise OpenDotaApiError(f"OpenDota 请求失败: {error}") from error
 
     @staticmethod
-    def _parse_position_stat(row: dict[str, Any]) -> HeroPositionStat:
+    def _parse_all_rank_stat(row: dict[str, Any]) -> HeroWinRateStat:
         try:
-            return HeroPositionStat(
-                position=int(row["position"]),
-                hero_id=int(row["hero_id"]),
-                hero_name=str(row["hero_name"]),
-                games=int(row["games"]),
-                wins=int(row["wins"]),
+            games = sum(int(row.get(f"{rank}_pick", 0)) for rank in range(1, 9))
+            wins = sum(int(row.get(f"{rank}_win", 0)) for rank in range(1, 9))
+            return HeroWinRateStat(
+                hero_id=int(row["id"]),
+                hero_name=str(row["localized_name"]),
+                games=games,
+                wins=wins,
             )
         except (KeyError, TypeError, ValueError) as error:
-            raise OpenDotaApiError(f"无法解析位置胜率数据: {row}") from error
+            raise OpenDotaApiError(f"无法解析英雄胜率数据: {row}") from error

@@ -1,54 +1,38 @@
-from datetime import datetime
-from zoneinfo import ZoneInfo
-
-from lib.open_dota_client import HeroPositionStat
-from service.weekly_hero_report import WeeklyHeroReportService, get_previous_week_range
+from lib.open_dota_client import HeroWinRateStat
+from service.weekly_hero_report import HeroWinRateReportService
 
 
 class StubOpenDotaClient:
-    def __init__(self, stats: list[HeroPositionStat]) -> None:
+    def __init__(self, stats: list[HeroWinRateStat]) -> None:
         self.stats = stats
-        self.arguments: tuple[int, int, int, int] | None = None
+        self.arguments: tuple[int, int] | None = None
 
-    def get_position_win_rate_leaders(
+    def get_all_rank_win_rate_leaders(
         self,
-        start_timestamp: int,
-        end_timestamp: int,
         top_count: int,
         min_games: int,
-    ) -> list[HeroPositionStat]:
-        self.arguments = (start_timestamp, end_timestamp, top_count, min_games)
+    ) -> list[HeroWinRateStat]:
+        self.arguments = (top_count, min_games)
         return self.stats
 
 
-def test_previous_week_uses_complete_natural_week() -> None:
-    now = datetime(2026, 8, 27, 20, tzinfo=ZoneInfo("Asia/Shanghai"))
-
-    start, end = get_previous_week_range(now)
-
-    assert start == datetime(2026, 8, 17, tzinfo=ZoneInfo("Asia/Shanghai"))
-    assert end == datetime(2026, 8, 24, tzinfo=ZoneInfo("Asia/Shanghai"))
-
-
-def test_report_formats_three_leaders_and_missing_positions() -> None:
+def test_report_formats_all_rank_top_ten_without_positions() -> None:
     stats = [
-        HeroPositionStat(1, 1, "Anti-Mage", 20, 12),
-        HeroPositionStat(1, 2, "Axe", 10, 5),
+        HeroWinRateStat(1, "Anti-Mage", 200, 120),
+        HeroWinRateStat(2, "Axe", 150, 75),
     ]
     client = StubOpenDotaClient(stats)
-    service = WeeklyHeroReportService(
+    service = HeroWinRateReportService(
         api_client=client,
         hero_name_resolver=lambda hero_id: "敌法师" if hero_id == 1 else None,
-        min_games=10,
+        min_games=100,
     )
 
-    report = service.build(
-        datetime(2026, 8, 27, 20, tzinfo=ZoneInfo("Asia/Shanghai"))
-    )
+    report = service.build()
 
-    assert "08-17 至 08-23" in report
-    assert "1.敌法师 60.0%（20场）" in report
-    assert "2.Axe 50.0%（10场）" in report
-    assert "5号位：样本不足" in report
+    assert "当前全分段英雄胜率 Top 10" in report
+    assert "1.敌法师 60.0%（200场）" in report
+    assert "2.Axe 50.0%（150场）" in report
+    assert "号位" not in report
     assert client.arguments is not None
-    assert client.arguments[2:] == (3, 10)
+    assert client.arguments == (10, 100)

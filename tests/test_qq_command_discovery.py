@@ -23,17 +23,26 @@ class FakeRequest:
 
 
 def test_payloads_expose_supported_private_and_group_commands() -> None:
+    private_items = build_private_menu()["menu"]["items"]
     private_messages = {
-        item["send_message"] for item in build_private_menu()["menu"]["items"]
+        item["send_message"]
+        for item in private_items
+        if item["type"] == "send_message"
+    }
+    help_item = next(item for item in private_items if item["name"] == "help")
+    help_messages = {
+        item["send_message"] for item in help_item["sub_menu_items"]
     }
     group_commands = {item["name"] for item in build_group_panel()["items"]}
 
     assert private_messages == {
         "高胜率英雄",
+        "简报",
+    }
+    assert help_messages == {
         "追踪术 昵称 dotaId",
         "撒情况 昵称",
         "今儿 昵称",
-        "简报",
     }
     assert group_commands == {
         "追踪术",
