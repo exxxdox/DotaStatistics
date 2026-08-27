@@ -1,4 +1,5 @@
 import os
+from functools import lru_cache
 
 from dateutil.tz import datetime_ambiguous
 from openai import OpenAI
@@ -9,14 +10,18 @@ from data_center import _log
 
 memory = []
 
-client = OpenAI(
-    api_key=os.environ.get('DEEPSEEK_API_KEY'),
-    base_url="https://api.deepseek.com")
+@lru_cache(maxsize=1)
+def get_client() -> OpenAI:
+    """延迟创建客户端，让非 AI 命令和测试不依赖 AI 凭据。"""
+    api_key = os.environ.get('DEEPSEEK_API_KEY')
+    if not api_key:
+        raise RuntimeError("缺少 DEEPSEEK_API_KEY 环境变量")
+    return OpenAI(api_key=api_key, base_url="https://api.deepseek.com")
 
 
 def deepseekDotaAnalyze(msg):
     _log.info("in deepseekDotaAnalyze")
-    response = client.chat.completions.create(
+    response = get_client().chat.completions.create(
         model="deepseek-reasoner",
         messages=[
             {"role": "system",
@@ -46,7 +51,7 @@ def deepseekGeneral(msg):
 
     memory.append((now, msg))
 
-    response = client.chat.completions.create(
+    response = get_client().chat.completions.create(
         model="deepseek-chat",
         messages=[
             {"role": "system",

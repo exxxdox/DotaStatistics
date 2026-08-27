@@ -1,3 +1,5 @@
 /.env
+.venv/
+.uv-cache/
 __pycache__/
 /res/name_id.json

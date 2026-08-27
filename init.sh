@@ -1,17 +1,22 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -euo pipefail
 
-apt install python3.12-venv -y
+# 与 deploy.sh 使用相同的物理路径，避免通过符号链接执行时目录不一致。
+SCRIPT_PATH="$(readlink -f -- "${BASH_SOURCE[0]}")"
+PROJECT_DIR="$(dirname -- "${SCRIPT_PATH}")"
 
-python3 -m venv myenv
+if ! command -v uv >/dev/null 2>&1; then
+    # uv 官方安装器将二进制放入当前用户目录，避免污染系统 Python。
+    UV_INSTALLER="$(mktemp)"
+    curl -LsSf https://astral.sh/uv/install.sh -o "${UV_INSTALLER}"
+    sh "${UV_INSTALLER}"
+    rm -f "${UV_INSTALLER}"
+    export PATH="${HOME}/.local/bin:${PATH}"
+fi
 
-. myenv/bin/activate
+cd "${PROJECT_DIR}"
+# uv 默认使用 .venv；锁文件保证服务器与开发环境安装相同版本。
+uv sync --frozen --no-dev
 
-pip install -r requirement.txt
-
-cp ./service/dota.service /etc/systemd/system/dota.service
-
-systemctl enable dota.service
-
-systemctl start dota.service
-
-systemctl status dota.service
+# 复用独立部署脚本，确保首次安装和后续更新采用相同的 systemd 流程。
+bash "${PROJECT_DIR}/deploy.sh"
