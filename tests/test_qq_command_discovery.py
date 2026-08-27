@@ -1,4 +1,5 @@
 import asyncio
+import json
 from typing import Any
 
 from service.qq_command_discovery import (
@@ -73,4 +74,23 @@ def test_configure_updates_existing_group_panel() -> None:
         ("PUT", "/v2/menu"),
         ("GET", "/v2/panels"),
         ("PUT", "/v2/panels/panel-id"),
+    ]
+
+
+def test_configure_accepts_json_string_returned_by_qq_botpy() -> None:
+    calls: list[tuple[str, str]] = []
+
+    async def request(route, **_kwargs):
+        calls.append((route.method, route.path))
+        if route.method == "GET":
+            # SDK 在 content-type 包含 charset 时会保留 JSON 原文。
+            return json.dumps({"records": [], "next_cursor": "", "is_end": True})
+        return "{}"
+
+    asyncio.run(QQCommandDiscoveryService(request).configure())
+
+    assert calls == [
+        ("PUT", "/v2/menu"),
+        ("GET", "/v2/panels"),
+        ("POST", "/v2/panels"),
     ]

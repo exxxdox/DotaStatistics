@@ -1,3 +1,4 @@
+import json
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -102,11 +103,19 @@ class QQCommandDiscoveryService:
         response = await self._request(
             Route("GET", "/v2/panels"), params={"scope": "group", "limit": 50}
         )
+        if isinstance(response, str):
+            try:
+                # qq-botpy 对带 charset 的 JSON 响应可能返回原始字符串。
+                response = json.loads(response)
+            except json.JSONDecodeError as error:
+                raise RuntimeError("QQ 指令面板列表返回了无效 JSON") from error
         if not isinstance(response, dict) or not isinstance(
             response.get("records"), list
         ):
             # 查询失败时禁止盲目创建，避免每次重启产生重复面板。
-            raise RuntimeError("QQ 指令面板列表响应格式错误")
+            raise RuntimeError(
+                f"QQ 指令面板列表响应格式错误: {type(response).__name__}"
+            )
 
         panel = build_group_panel()
         existing = next(
