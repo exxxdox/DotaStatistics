@@ -40,6 +40,13 @@ if grep -q '__PROJECT_DIR__' "${RENDERED_UNIT}"; then
     exit 1
 fi
 
+# 提前校验 systemd 最关键的路径约束，避免用无效 unit 覆盖线上文件。
+RENDERED_WORKING_DIR="$(sed -n 's/^WorkingDirectory=//p' "${RENDERED_UNIT}")"
+if [[ "${RENDERED_WORKING_DIR}" != /* ]]; then
+    echo "WorkingDirectory 不是绝对路径: ${RENDERED_WORKING_DIR}" >&2
+    exit 1
+fi
+
 install -m 0644 "${RENDERED_UNIT}" "${UNIT_TARGET}"
 systemctl daemon-reload
 systemctl enable "${SERVICE_NAME}"

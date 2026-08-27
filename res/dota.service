@@ -2,7 +2,8 @@
 Description=dota qqbot
 [Service]
 EnvironmentFile=/root/.secrets
-WorkingDirectory="__PROJECT_DIR__"
+# WorkingDirectory 不是 shell 命令，双引号会被视为路径内容而导致绝对路径校验失败。
+WorkingDirectory=__PROJECT_DIR__
 # 生产服务直接使用 uv 同步出的 .venv，重启时不再触发依赖解析。
 ExecStart="__PROJECT_DIR__/.venv/bin/python" main.py
 Restart=on-failure
