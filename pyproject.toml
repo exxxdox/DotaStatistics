@@ -22,3 +22,9 @@ dev = [
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
+
+[[tool.uv.index]]
+# 设为 default 会关闭隐式 PyPI，确保锁定和安装都统一使用清华镜像。
+name = "tsinghua"
+url = "https://pypi.tuna.tsinghua.edu.cn/simple"
+default = true
