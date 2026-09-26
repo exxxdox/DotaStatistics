@@ -12,12 +12,12 @@ from typing import Any
 
 import requests
 
+from data_center import hero_stats_cache_path
 from lib.utils import whetherWin
 
 _log = logging.getLogger(__name__)
-DEFAULT_HERO_STATS_CACHE_PATH = (
-    Path(__file__).resolve().parent.parent / "res" / "daily_hero_stats_cache.json"
-)
+# 运行时缓存与镜像内静态资源分离，容器重建后仍可由数据卷恢复。
+DEFAULT_HERO_STATS_CACHE_PATH = hero_stats_cache_path
 RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504, 522, 524}
 STAT_PERIOD_DAYS = 30
 CACHE_SCHEMA_VERSION = 2

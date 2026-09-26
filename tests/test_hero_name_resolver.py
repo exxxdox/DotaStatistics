@@ -1,13 +1,19 @@
-import pandas as pd
+from pathlib import Path
+
+from openpyxl import Workbook
 
 from lib.hero_name_resolver import HeroNameResolver
 
 
-def _write_excel(tmp_path) -> None:
+def _write_excel(tmp_path: Path) -> Path:
     path = tmp_path / "hero_name.xlsx"
-    pd.DataFrame(
-        [{"id": 1, "name_zh": "敌法师"}, {"id": 2, "name_zh": "斧王"}]
-    ).to_excel(path, index=False)
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(["id", "name_zh"])
+    sheet.append([1, "敌法师"])
+    sheet.append([2, "斧王"])
+    workbook.save(path)
+    workbook.close()
     return path
 
 

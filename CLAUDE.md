@@ -8,7 +8,7 @@ https://docs.opendota.com
 
 ## Project Structure & Module Organization
 
-`main.py` is the application entry point, while `qq_bot.py` contains the QQ SDK client, command routing, and dependency assembly (`build_default_services`). Shared config and resource paths live in `data_center.py`; player and hero mappings are owned by repository classes in `lib/` (`player_repository.py`, `hero_name_resolver.py`) rather than global state. Put external integrations in `lib/` (`open_dota_client.py`, `deepseek_api.py`) and higher-level report workflows in `service/`. Static and deployment assets belong in `res/`; generated `res/name_id.json` is intentionally ignored. Tests live in `tests/` and should mirror the module under test, for example `tests/test_qq_bot.py`.
+`main.py` is the application entry point, while `qq_bot.py` contains the QQ SDK client, command routing, and dependency assembly (`build_default_services`). Shared config and resource paths live in `data_center.py`; player and hero mappings are owned by repository classes in `lib/` (`player_repository.py`, `hero_name_resolver.py`) rather than global state. Put external integrations in `lib/` (`open_dota_client.py`, `deepseek_api.py`) and higher-level report workflows in `service/`. Static assets belong in `res/`; generated runtime JSON belongs in the ignored `data/` directory or the directory selected by `DATA_DIR`. Tests live in `tests/` and should mirror the module under test, for example `tests/test_qq_bot.py`.
 
 ## Build, Test, and Development Commands
 
@@ -16,6 +16,8 @@ https://docs.opendota.com
 - `uv run python main.py` starts the bot locally using environment configuration.
 - `uv run pytest` runs the complete test suite configured by `pyproject.toml`.
 - `uv run pytest tests/test_qq_bot.py -q` runs the command-router tests only.
+- `docker compose up -d --build` is the default production deployment command.
+- `docker compose logs -f bot` follows the containerized bot logs.
 - `./startup.sh` starts the locked production environment on Linux; `sudo ./init.sh` installs and enables the systemd service.
 
 Use Python 3.12. Commit `uv.lock` whenever dependency changes alter the resolved environment.

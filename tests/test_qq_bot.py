@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import botpy
 
+import qq_bot
 from qq_bot import BotServices, CommandContext, CommandRouter, MyClient
 
 
@@ -285,3 +286,25 @@ def test_private_menu_command_uses_command_router() -> None:
     message = asyncio.run(run_private_command())
 
     assert message.replies == [{"msg_type": 0, "content": "今日简报"}]
+
+
+def test_start_disables_sdk_file_logging(monkeypatch) -> None:
+    created: dict[str, object] = {}
+    run_arguments: dict[str, str] = {}
+
+    class FakeClient:
+        def __init__(self, **kwargs) -> None:
+            created.update(kwargs)
+
+        def run(self, **kwargs) -> None:
+            run_arguments.update(kwargs)
+
+    monkeypatch.setenv("QQBOT_APP_ID", "test-app-id")
+    monkeypatch.setenv("QQBOT_APP_SECRET", "test-secret")
+    monkeypatch.setattr(qq_bot, "MyClient", FakeClient)
+    monkeypatch.setattr(qq_bot, "CommandRouter", lambda: object())
+
+    qq_bot.start()
+
+    assert created["ext_handlers"] is False
+    assert run_arguments == {"appid": "test-app-id", "secret": "test-secret"}

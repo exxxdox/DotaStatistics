@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-import pandas as pd
+from openpyxl import load_workbook
 
 
 class HeroNameResolver:
@@ -15,11 +15,29 @@ class HeroNameResolver:
 
     def load(self) -> None:
         """从 Excel 加载英雄中文名映射。"""
-        frame = pd.read_excel(self.excel_path)
-        self._zh_names = {
-            int(row["id"]): row["name_zh"]
-            for _, row in frame.iterrows()
-        }
+        # 文件只有两列静态映射，直接使用 openpyxl 避免为简单读取引入 pandas/numpy。
+        workbook = load_workbook(self.excel_path, read_only=True, data_only=True)
+        try:
+            rows = workbook.active.iter_rows(values_only=True)
+            headers = next(rows, None)
+            if headers is None:
+                raise ValueError("英雄名称表为空")
+            try:
+                id_index = headers.index("id")
+                name_index = headers.index("name_zh")
+            except ValueError as error:
+                raise ValueError("英雄名称表缺少 id 或 name_zh 列") from error
+
+            names: dict[int, str] = {}
+            for row in rows:
+                hero_id = row[id_index]
+                hero_name = row[name_index]
+                if hero_id is None or hero_name is None:
+                    continue
+                names[int(hero_id)] = str(hero_name)
+            self._zh_names = names
+        finally:
+            workbook.close()
 
     def set_en_names(self, en_names: dict[int, str]) -> None:
         """注入 OpenDota 提供的英文名，作为中文名缺失时的后备。"""

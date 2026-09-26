@@ -1,10 +1,27 @@
-"""共享配置与资源路径。选手/英雄映射改由 lib 下的仓库类持有，不再使用全局列表。"""
+"""共享配置与资源路径。"""
 
+import os
 from pathlib import Path
 
 from botpy import logging
 
 _log = logging.get_logger()
-hero_excel_path = Path(f"{Path(__file__).resolve().parent}/res/hero_name.xlsx")
-common_id_path = Path(f"{Path(__file__).resolve().parent}/res/name_id.json")
+
+project_dir = Path(__file__).resolve().parent
+resource_dir = project_dir / "res"
+
+
+def _resolve_data_dir() -> Path:
+    """返回运行时数据目录，允许容器把它映射到持久卷。"""
+    configured_dir = os.environ.get("DATA_DIR")
+    if configured_dir:
+        # 提前解析为绝对路径，避免工作目录变化后把数据写到其他位置。
+        return Path(configured_dir).expanduser().resolve()
+    return project_dir / "data"
+
+
+data_dir = _resolve_data_dir()
+hero_excel_path = resource_dir / "hero_name.xlsx"
+common_id_path = data_dir / "name_id.json"
+hero_stats_cache_path = data_dir / "daily_hero_stats_cache.json"
 enable_ai = True

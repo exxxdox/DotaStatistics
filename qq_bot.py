@@ -330,6 +330,8 @@ def start() -> None:
     client = MyClient(
         intents=intents,
         router=CommandRouter(),
+        # 容器日志交给 stdout/stderr 和 Docker 收集，避免 SDK 在应用目录写日志文件。
+        ext_handlers=False,
     )
     client.run(appid=app_id, secret=app_secret)
 

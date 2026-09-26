@@ -1,0 +1,16 @@
+services:
+  bot:
+    build:
+      context: .
+    image: dota:local
+    restart: unless-stopped
+    init: true
+    env_file:
+      - .env
+    environment:
+      # 只把运行时 JSON 写入持久目录，避免覆盖镜像内的英雄名称静态资源。
+      DATA_DIR: /data
+    volumes:
+      # 绑定宿主机目录，让备份、查看和迁移运行数据更直接。
+      - ./data:/data
+    stop_grace_period: 30s
