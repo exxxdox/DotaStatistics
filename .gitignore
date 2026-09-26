@@ -10,3 +10,4 @@ res/daily_hero_stats_cache.json
 res/daily_hero_stats_cache.json.tmp
 __pycache__/
 /res/name_id.json
+/dist
