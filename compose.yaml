@@ -1,10 +1,10 @@
 services:
-  bot:
-    build:
-      context: .
-    image: dota:local
+  dota:
+    image: exxxdox/exxxdox-p:dota-latest
     restart: unless-stopped
     init: true
+    stop_signal: SIGINT
+    stop_grace_period: 10s
     env_file:
       - .env
     environment:
@@ -13,4 +13,4 @@ services:
     volumes:
       # 绑定宿主机目录，让备份、查看和迁移运行数据更直接。
       - ./data:/data
-    stop_grace_period: 30s
+networks: {}
