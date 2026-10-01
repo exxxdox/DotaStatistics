@@ -218,26 +218,18 @@ class CommandRouter:
         )
 
     def _track(self, args: list[str]) -> str:
-        if not args or args == ["昵称", "dotaId"]:
-            # QQ 客户端可能短期缓存旧菜单中的占位参数；占位词不能当作真实输入。
-            return "请输入昵称和 dotaId，例如：追踪术 小明 123456789"
-        if len(args) != 2:
-            return "用法: 追踪术 昵称 dotaId"
-
+        # 参数数量、占位词和正整数已由统一入口校验，业务处理只负责绑定。
         nickname, raw_dota_id = args
-        try:
-            dota_id = int(raw_dota_id)
-        except ValueError:
-            return "dotaId 必须是数字。"
-
-        self.services.set_dota_id(nickname, dota_id)
+        self.services.set_dota_id(nickname, int(raw_dota_id))
         _log.info("追踪关系已更新")
         return "哦这个主意好,咱们可以看看这个逼最近打的怎么样~"
 
     def _recent_matches(self, args: list[str]) -> str:
-        nickname, dota_id, error = self._resolve_player(args, "撒情况")
-        if error is not None:
-            return error
+        # 输入格式已由统一入口校验；是否已绑定仍需查询当前仓库。
+        nickname = args[0]
+        dota_id = self.services.get_dota_id(nickname)
+        if dota_id is None:
+            return f"还没有追踪选手「{nickname}」。"
 
         _log.info("查询近期比赛")
         result = self.services.get_recent_matches(dota_id)
@@ -247,18 +239,3 @@ class CommandRouter:
         if args:
             return "用法: 简报"
         return self.services.get_today_report()
-
-    def _resolve_player(
-        self, args: list[str], command: str
-    ) -> tuple[str, int, str | None]:
-        if not args or args == ["昵称"]:
-            # 兼容尚未刷新的旧菜单 payload，避免实际查询名为“昵称”的选手。
-            return "", 0, f"请输入昵称，例如：{command} 小明"
-        if len(args) != 1:
-            return "", 0, f"用法: {command} 昵称"
-
-        nickname = args[0]
-        dota_id = self.services.get_dota_id(nickname)
-        if dota_id is None:
-            return "", 0, f"还没有追踪选手「{nickname}」。"
-        return nickname, dota_id, None

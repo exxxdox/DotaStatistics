@@ -239,7 +239,7 @@ def test_slow_group_hero_report_replies_before_background_update_finishes(memory
         await client.on_group_at_message_create(message)
         # 等待后台线程结束，验证超时只影响当次回复，不会取消缓存更新。
         await asyncio.sleep(0.1)
-        assert not client._background_report_tasks
+        assert client._hero_report_task.done()
         return message
 
     message = asyncio.run(run_request())

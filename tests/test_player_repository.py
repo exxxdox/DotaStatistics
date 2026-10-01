@@ -52,14 +52,6 @@ def test_persists_players_and_reloads(tmp_path) -> None:
     assert reloaded.get("小红") == 456
 
 
-def test_get_nickname_by_dota_id(tmp_path) -> None:
-    repository = PlayerRepository(tmp_path / "name_id.json")
-    repository.set("小明", 123)
-
-    assert repository.get_nickname(123) == "小明"
-    assert repository.get_nickname(999) is None
-
-
 def test_nicknames_lists_players_in_insertion_order(tmp_path) -> None:
     path = _write_records(
         tmp_path,

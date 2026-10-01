@@ -2,7 +2,7 @@
 
 from functools import partial
 
-from data_center import _log, common_id_path, hero_excel_path
+from data_center import _log, common_id_path, hero_names_path
 from lib.deepseek_api import deepseek_command_question, deepseek_general
 from lib.hero_name_resolver import HeroNameResolver
 from lib.open_dota_client import OpenDotaApiClient, OpenDotaApiError
@@ -14,7 +14,7 @@ from service.today import TodayReportService
 def build_default_services() -> BotServices:
     """组装依赖真实实现的 BotServices，供 CommandRouter 默认使用。"""
     players = PlayerRepository(common_id_path)
-    hero_names = HeroNameResolver(hero_excel_path)
+    hero_names = HeroNameResolver(hero_names_path)
     hero_names.load()
     api_client = OpenDotaApiClient(hero_name_resolver=hero_names.resolve)
     try:

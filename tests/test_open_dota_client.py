@@ -322,27 +322,6 @@ def test_get_reports_sanitized_api_error_without_full_url() -> None:
     assert "SELECT secret" not in str(captured.value)
 
 
-def test_get_player_wl_returns_win_loss_tuple() -> None:
-    client = OpenDotaApiClient(
-        session=FakeSession([FakeResponse(200, {"win": 3, "lose": 1})]),
-        max_retries=0,
-        cache_path=None,
-    )
-
-    assert client.get_player_wl(123, 1) == (3, 1)
-    assert client.session.calls == 1
-
-
-def test_get_player_wl_returns_none_on_api_error() -> None:
-    client = OpenDotaApiClient(
-        session=FakeSession([FakeResponse(502, {"error": "boom"})]),
-        max_retries=0,
-        cache_path=None,
-    )
-
-    assert client.get_player_wl(123, 1) is None
-
-
 def test_recent_matches_default_returns_five_ranked_games() -> None:
     ranked = {"game_mode": 22, "hero_id": 1, "radiant_win": True, "player_slot": 0}
     client = OpenDotaApiClient(

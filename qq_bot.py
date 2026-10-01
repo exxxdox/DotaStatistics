@@ -49,7 +49,7 @@ class MyClient(botpy.Client):
             self.api._http.request
         )
         self.hero_report_reply_timeout = hero_report_reply_timeout
-        self._background_report_tasks: set[asyncio.Task[str]] = set()
+        # 单个任务引用同时保活后台查询和保留缓存，无需另一份任务集合。
         self._hero_report_task: asyncio.Task[str] | None = None
         self._hero_report_completed_at = 0.0
         self._hero_report_day: date | None = None
@@ -154,7 +154,6 @@ class MyClient(botpy.Client):
             task = asyncio.create_task(asyncio.to_thread(self.hero_win_rate_report.build))
             self._hero_report_task = task
             self._hero_report_day = today
-            self._background_report_tasks.add(task)
             task.add_done_callback(self._finish_background_report)
         try:
             return await asyncio.wait_for(
@@ -165,7 +164,6 @@ class MyClient(botpy.Client):
             return "英雄胜率数据正在更新，请稍后再次查询。"
 
     def _finish_background_report(self, task: asyncio.Task[str]) -> None:
-        self._background_report_tasks.discard(task)
         if task is self._hero_report_task:
             # 完成的 Task 保留完整报表，随后请求可立即复用；跨 UTC 日会失效。
             self._hero_report_completed_at = asyncio.get_running_loop().time()

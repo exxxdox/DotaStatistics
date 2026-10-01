@@ -11,6 +11,7 @@ __pycache__
 .env
 data
 res/*.json
+!res/hero_name.json
 res/*.tmp
 tests
 AGENTS.md

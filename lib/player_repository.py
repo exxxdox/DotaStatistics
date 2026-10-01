@@ -46,12 +46,6 @@ class PlayerRepository:
                 return record["dota_id"]
         return None
 
-    def get_nickname(self, dota_id: int) -> str | None:
-        for record in self._records:
-            if record["dota_id"] == dota_id:
-                return record["nick_name"]
-        return None
-
     def nicknames(self) -> list[str]:
         return [record["nick_name"] for record in self._records]
 

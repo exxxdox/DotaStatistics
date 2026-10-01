@@ -37,7 +37,7 @@ COPY --from=builder /app/.venv /app/.venv
 COPY --chown=bot:bot main.py qq_bot.py data_center.py bootstrap.py ./
 COPY --chown=bot:bot lib ./lib
 COPY --chown=bot:bot service ./service
-COPY --chown=bot:bot res/hero_name.xlsx ./res/hero_name.xlsx
+COPY --chown=bot:bot res/hero_name.json ./res/hero_name.json
 
 USER bot
 
