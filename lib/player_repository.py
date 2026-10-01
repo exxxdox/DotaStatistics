@@ -55,6 +55,14 @@ class PlayerRepository:
     def nicknames(self) -> list[str]:
         return [record["nick_name"] for record in self._records]
 
+    def bindings(self) -> dict[str, int]:
+        """返回供 AI 常驻资料使用的独立快照，调用方不能修改仓库。"""
+        bindings: dict[str, int] = {}
+        for record in self._records:
+            # 旧文件可能有重复昵称，保持与 get 相同的首项优先语义。
+            bindings.setdefault(record["nick_name"], record["dota_id"])
+        return bindings
+
     def _save(self) -> None:
         self.file_path.parent.mkdir(parents=True, exist_ok=True)
         self.file_path.write_text(

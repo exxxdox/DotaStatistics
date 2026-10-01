@@ -83,3 +83,33 @@ def test_missing_file_starts_empty_and_creates_on_write(tmp_path) -> None:
     assert json.loads(path.read_text(encoding="utf-8")) == [
         {"nick_name": "小明", "dota_id": 123}
     ]
+
+
+def test_bindings_returns_independent_current_and_persistent_snapshot(tmp_path) -> None:
+    path = tmp_path / "name_id.json"
+    repository = PlayerRepository(path)
+    assert repository.bindings() == {}
+    repository.set("小明", 123)
+    snapshot = repository.bindings()
+    snapshot["小明"] = 999
+    snapshot["小红"] = 456
+
+    assert repository.bindings() == {"小明": 123}
+    repository.set("小明", 789)
+    assert repository.bindings() == {"小明": 789}
+    assert PlayerRepository(path).bindings() == {"小明": 789}
+
+
+def test_bindings_preserves_first_duplicate_nickname(tmp_path) -> None:
+    path = _write_records(
+        tmp_path,
+        [
+            {"nick_name": "小明", "dota_id": 123},
+            {"nick_name": "小明", "dota_id": 456},
+            {"nick_name": "小红", "dota_id": 789},
+        ],
+    )
+    repository = PlayerRepository(path)
+
+    assert repository.bindings() == {"小明": repository.get("小明"), "小红": 789}
+    assert repository.bindings()["小明"] == 123

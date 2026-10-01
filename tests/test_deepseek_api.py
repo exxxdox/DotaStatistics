@@ -125,3 +125,42 @@ def test_parameter_question_uses_short_nonthinking_request_without_history(monke
         "command": "追踪术", "field": "dotaId", "reason": "dotaId 必须是正整数。"
     }
     memory.assert_not_called()
+
+
+def test_permanent_players_survive_history_window_and_use_latest_ids(
+    monkeypatch, memory_store, tmp_path
+) -> None:
+    import json
+
+    from lib.player_repository import PlayerRepository
+
+    players = PlayerRepository(tmp_path / "players.json")
+    players.set("小明", 123)
+    # 旧聊天记录会被上下文窗口排除，选手资料必须仍来自独立持久仓库。
+    memory_store.append("c2c:user-a", "user", "旧聊天绑定：小明123")
+    for index in range(25):
+        memory_store.append("c2c:user-a", "user", f"普通聊天{index}")
+    client = build_client()
+    monkeypatch.setattr(deepseek_api, "get_client", lambda: client)
+
+    deepseek_api.deepseek_general(
+        "已记录哪些选手？", "c2c:user-a", player_bindings=players.bindings
+    )
+    messages = client.chat.completions.create.call_args.kwargs["messages"]
+    assert json.loads(messages[1]["content"]) == {"tracked_players": {"小明": 123}}
+    assert all("旧聊天绑定" not in message["content"] for message in messages)
+    assert "小明" not in messages[0]["content"]
+
+    players.set("小明", 789)
+    deepseek_api.deepseek_general(
+        "最新ID是什么？", "c2c:user-a", player_bindings=players.bindings
+    )
+    messages = client.chat.completions.create.call_args.kwargs["messages"]
+    assert json.loads(messages[1]["content"]) == {"tracked_players": {"小明": 789}}
+
+    restarted = PlayerRepository(players.file_path)
+    deepseek_api.deepseek_command_question(
+        "今儿", "昵称", "", player_bindings=restarted.bindings
+    )
+    data = client.chat.completions.create.call_args.kwargs["messages"][1]["content"]
+    assert json.loads(data)["tracked_players"] == {"小明": 789}

@@ -41,6 +41,7 @@ class BotServices:
     resolve_hero_name: Callable[[int], str | None]
     list_player_nicknames: Callable[[], list[str]]
     ask_command_parameter: Callable[[str, str, str], str] | None = None
+    list_player_bindings: Callable[[], dict[str, int]] | None = None
 
 
 class CommandRouter:
@@ -160,15 +161,26 @@ class CommandRouter:
         if dialogue:
             dialogue.set_pending(context.conversation_id, context.speaker_id, (command, args))
         fallback = f"{reason}请直接回复{field}，或发送完整命令。回复“取消”可退出。"
+        roster_hint = ""
+        if field == "昵称" and self.services.list_player_bindings is not None:
+            bindings = self.services.list_player_bindings()
+            # 名单由代码展示，AI漏报或不可用时也能准确提示所有已绑定选手。
+            roster_hint = (
+                "\n已记录选手：" + "、".join(
+                    f"{nickname}（Dota ID：{dota_id}）"
+                    for nickname, dota_id in bindings.items()
+                )
+                if bindings else "\n尚未记录选手，请先使用：追踪术 昵称 dotaId。"
+            )
         if self.ai_enabled and self.services.ask_command_parameter is not None:
             try:
                 question = self.services.ask_command_parameter(command, field, reason).strip()
                 if question:
-                    return question
+                    return question + roster_hint
             except Exception:
                 # AI 只负责问句，故障时仍能按确定的参数状态完成填写。
                 _log.exception("生成命令参数追问失败")
-        return fallback
+        return fallback + roster_hint
 
     def chat(
         self, content: str, conversation_id: str, history_before_id: int | None = None

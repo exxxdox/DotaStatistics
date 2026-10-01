@@ -1,5 +1,7 @@
 """集中组装真实依赖，避免命令路由和 QQ 收发层各自维护初始化逻辑。"""
 
+from functools import partial
+
 from data_center import _log, common_id_path, hero_excel_path
 from lib.deepseek_api import deepseek_command_question, deepseek_general
 from lib.hero_name_resolver import HeroNameResolver
@@ -27,8 +29,10 @@ def build_default_services() -> BotServices:
         get_recent_matches=api_client.get_recent_matches,
         get_player_wl=api_client.get_player_wl,
         get_today_report=today_report.build,
-        chat=deepseek_general,
+        # 绑定读取函数而非启动时的名单，既复用持久资料，又避免AI使用过期ID。
+        chat=partial(deepseek_general, player_bindings=players.bindings),
         resolve_hero_name=hero_names.resolve,
         list_player_nicknames=players.nicknames,
-        ask_command_parameter=deepseek_command_question,
+        ask_command_parameter=partial(deepseek_command_question, player_bindings=players.bindings),
+        list_player_bindings=players.bindings,
     )

@@ -6,7 +6,7 @@ from lib.conversation_memory import ConversationMemory
 from service.command_router import BotServices, CommandContext, CommandRouter
 
 
-def make_router(store, *, ask=None, saved=None, ai_enabled=True) -> CommandRouter:
+def make_router(store, *, ask=None, saved=None, ai_enabled=True, bindings=None) -> CommandRouter:
     services = BotServices(
         set_dota_id=lambda nickname, dota_id: saved.append((nickname, dota_id)),
         get_dota_id={"小明": 123, "小红": 456}.get,
@@ -17,6 +17,7 @@ def make_router(store, *, ask=None, saved=None, ai_enabled=True) -> CommandRoute
         resolve_hero_name=lambda _hero_id: None,
         list_player_nicknames=lambda: ["小明", "小红"],
         ask_command_parameter=ask,
+        list_player_bindings=bindings,
     )
     return CommandRouter(services, memory_store=store, ai_enabled=ai_enabled)
 
@@ -112,3 +113,24 @@ def test_valid_command_never_calls_ai_and_no_context_never_creates_shared_state(
     ask.assert_not_called()
     assert router.dispatch("今儿") == "问题"
     assert not list(store.root.iterdir())
+
+
+@pytest.mark.parametrize("ai_available", [True, False])
+def test_nickname_question_lists_current_bindings_even_when_ai_fails(store, ai_available) -> None:
+    bindings = {"小明": 123, "小红": 456}
+    ask = Mock(return_value="想查哪位选手？")
+    if not ai_available:
+        ask.side_effect = RuntimeError("AI unavailable")
+    router = make_router(store, ask=ask, bindings=lambda: dict(bindings))
+    question = router.dispatch("今儿", PRIVATE_CONTEXT)
+    assert "小明（Dota ID：123）" in question
+    assert "小红（Dota ID：456）" in question
+    bindings["小明"] = 789
+    question = router.dispatch("撒情况", PRIVATE_CONTEXT)
+    assert "小明（Dota ID：789）" in question
+    assert "Dota ID：123" not in question
+
+
+def test_empty_permanent_roster_guides_tracking(store) -> None:
+    router = make_router(store, bindings=lambda: {})
+    assert "尚未记录选手，请先使用：追踪术 昵称 dotaId" in router.dispatch("今儿", PRIVATE_CONTEXT)

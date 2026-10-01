@@ -31,8 +31,11 @@ def test_default_router_assembles_services_without_live_integrations(
 
     assert router.dispatch("撒情况 小明") == "比赛:123"
     assert router.dispatch("简报") == "今日简报"
-    assert router.services.chat is bootstrap.deepseek_general
-    assert router.services.ask_command_parameter is bootstrap.deepseek_command_question
+    assert router.services.chat.func is bootstrap.deepseek_general
+    assert router.services.chat.keywords["player_bindings"] == players.bindings
+    assert router.services.ask_command_parameter.func is bootstrap.deepseek_command_question
+    assert router.services.ask_command_parameter.keywords["player_bindings"] == players.bindings
+    assert router.services.list_player_bindings == players.bindings
     bootstrap.OpenDotaApiClient.assert_called_once_with(
         hero_name_resolver=hero_names.resolve
     )
