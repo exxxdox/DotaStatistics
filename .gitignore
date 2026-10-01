@@ -12,3 +12,4 @@ __pycache__/
 /res/name_id.json
 /dist
 /compose.override.yaml
+/dota.tar
