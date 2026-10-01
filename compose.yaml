@@ -1,6 +1,8 @@
 services:
   dota:
-    image: exxxdox/exxxdox-p:dota-latest
+    build:
+      context: .
+    image: dota:local
     restart: unless-stopped
     init: true
     stop_signal: SIGINT
