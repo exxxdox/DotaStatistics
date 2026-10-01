@@ -176,3 +176,23 @@ def test_pending_capacity_is_reserved_when_rejecting_large_message(tmp_path):
         store.append("c2c:alice", "assistant", noise(25000))
     assert store.read("c2c:alice") == [{"role": "user", "content": "保留原记录"}]
     assert store.get_pending("c2c:alice", "alice") == ("今儿", [])
+
+
+def test_clear_is_persistent_isolated_and_keeps_ids_increasing(tmp_path) -> None:
+    store = ConversationMemory(tmp_path)
+    previous_id = store.append("group:room", "user", "旧历史")
+    store.set_pending("group:room", "alice", ("追踪术", []))
+    store.set_pending("group:room", "bob", ("撒情况", []))
+    store.append("c2c:alice", "user", "独立私聊")
+    store.clear("group:room")
+    restarted = ConversationMemory(tmp_path)
+    assert restarted.read("group:room") == []
+    assert restarted.get_pending("group:room", "alice") is None
+    assert restarted.get_pending("group:room", "bob") is None
+    assert restarted.read("c2c:alice")[0]["content"] == "独立私聊"
+    assert restarted.append("group:room", "user", "新历史") > previous_id
+    restarted.clear("group:room")
+    restarted.clear("group:room")
+    restarted.clear("c2c:missing")
+    with pytest.raises(ValueError):
+        restarted.clear("default")

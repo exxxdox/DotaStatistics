@@ -227,6 +227,20 @@ class ConversationMemory:
             assert cursor.lastrowid is not None
             return cursor.lastrowid
 
+    def clear(self, conversation_id: str) -> None:
+        """清空当前会话的记录和所有成员追问，不影响其他会话或选手资料。"""
+        path, limit = self._location(conversation_id)
+        if not path.exists():
+            return
+        with closing(self._connect(path, limit)) as connection, connection:
+            # 原子删除而非移除数据库文件，避免并发连接写入失联文件；保留递增 ID。
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute("DELETE FROM messages")
+            if connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'pending'"
+            ).fetchone():
+                connection.execute("DELETE FROM pending")
+
     def read(
         self,
         conversation_id: str,

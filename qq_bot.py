@@ -18,7 +18,7 @@ from service.command_router import (
     CommandRouter,
     normalize_command_content,
 )
-from service.commands import HERO_COMMAND
+from service.commands import CLEAR_COMMAND, HERO_COMMAND
 from service.hero_win_rate_report import HeroWinRateReportService
 from service.qq_command_discovery import QQCommandDiscoveryService
 
@@ -98,6 +98,7 @@ class MyClient(botpy.Client):
             await message.reply(msg_type=0, content="对话记录存储失败，请稍后再试。")
             return
 
+        record_reply = True
         try:
             normalized_content = normalize_command_content(message.content)
             hero_commands = {PRIVATE_HERO_REPORT_COMMAND}
@@ -121,15 +122,19 @@ class MyClient(botpy.Client):
                 reply = await asyncio.to_thread(
                     self.router.dispatch, message.content, context
                 )
+                # 成功清空后不重新写入确认回复，数据库保持空白；失败提示仍照常记录。
+                if normalized_content == CLEAR_COMMAND.name:
+                    record_reply = False
         except Exception:
             _log.exception("处理对话失败")
             reply = "处理失败了，稍后再试。"
 
         try:
             # 发送前保存生成的回复，发送失败仍保留此次输入与回复尝试。
-            await asyncio.to_thread(
-                self.memory_store.append, conversation_id, "assistant", reply
-            )
+            if record_reply:
+                await asyncio.to_thread(
+                    self.memory_store.append, conversation_id, "assistant", reply
+                )
         except Exception:
             _log.exception("保存机器人回复失败")
             await message.reply(msg_type=0, content="对话记录存储失败，请稍后再试。")

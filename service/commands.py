@@ -35,6 +35,11 @@ HERO_COMMAND = Command(
     private_label="英雄胜率",
 )
 
+CLEAR_COMMAND = Command(
+    "clear", "clear", "清空当前会话记录", private_label="清空对话",
+)
+
 COMMANDS = (
     TRACK_COMMAND, RECENT_COMMAND, REPORT_COMMAND, GROUP_OPENID_COMMAND, HERO_COMMAND,
+    CLEAR_COMMAND,
 )

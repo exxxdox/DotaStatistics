@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 from data_center import _log, enable_ai
 from lib.conversation_memory import ConversationMemory
-from service.commands import COMMANDS, GROUP_OPENID_COMMAND, TRACK_COMMAND
+from service.commands import CLEAR_COMMAND, COMMANDS, GROUP_OPENID_COMMAND, TRACK_COMMAND
 
 CommandHandler = Callable[[list[str]], str]
 
@@ -66,6 +66,14 @@ class CommandRouter:
         # 正文只进入压缩数据库，避免普通日志额外保留未压缩的聊天记录。
         _log.info("收到消息，开始命令分发")
         dialogue = self._dialogue_store(context)
+        # 清理先于读取旧追问执行，损坏或未完成的状态也不能拦住清空命令。
+        if words and words[0] == CLEAR_COMMAND.name:
+            if len(words) != 1:
+                return f"用法: /{CLEAR_COMMAND.usage}"
+            if dialogue is None:
+                return "当前消息不包含有效会话标识。"
+            dialogue.clear(context.conversation_id)
+            return "已清空当前会话的对话记录，已绑定选手资料保留。"
         pending = dialogue.get_pending(context.conversation_id, context.speaker_id) if dialogue else None
 
         # 升级后清理已删除命令的旧追问，避免恢复状态时调用不存在的处理器。

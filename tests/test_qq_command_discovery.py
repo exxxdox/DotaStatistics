@@ -41,6 +41,7 @@ def test_payloads_expose_supported_private_and_group_commands() -> None:
     group_commands = {item["name"] for item in build_group_panel()["items"]}
 
     assert private_messages == {
+        "clear",
         "高胜率英雄",
         "简报",
     }
@@ -49,6 +50,7 @@ def test_payloads_expose_supported_private_and_group_commands() -> None:
         "撒情况",
     }
     assert group_commands == {
+        "clear",
         "追踪术",
         "撒情况",
         "简报",

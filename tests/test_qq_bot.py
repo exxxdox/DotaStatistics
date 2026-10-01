@@ -607,3 +607,53 @@ def test_sdk_group_parameter_state_is_per_member_and_hero_command_cancels(memory
     assert replies[1:3] == ["AI:小明", "比赛:123"]
     assert replies[-2:] == ["英雄榜", "AI:小明"]
     assert memory_store.get_pending("group:group-a", "alice") is None
+
+
+@pytest.mark.parametrize("is_group", [False, True])
+def test_clear_erases_current_conversation_without_recording_confirmation(memory_store, tmp_path, is_group) -> None:
+    from lib.player_repository import PlayerRepository
+
+    players = PlayerRepository(tmp_path / "players.json")
+    players.set("小明", 123)
+    conversation = "group:room" if is_group else "c2c:alice"
+    memory_store.append(conversation, "user", "旧对话")
+    memory_store.set_pending(conversation, "alice", ("追踪术", []))
+    memory_store.append("c2c:bob", "user", "其他用户记录")
+    replies = []
+
+    class Message:
+        content = "/clear"
+        group_openid = "room"
+        author = SimpleNamespace(user_openid="alice", member_openid="alice")
+
+        async def reply(self, **kwargs):
+            replies.append(kwargs["content"])
+            return SimpleNamespace(id="reply-id")
+
+    async def run() -> None:
+        bot = MyClient(
+            router=build_router(get_dota_id=players.get),
+            intents=botpy.Intents(public_messages=True), ext_handlers=False,
+        )
+        if is_group:
+            await bot.on_group_at_message_create(Message())
+        else:
+            await bot.on_c2c_message_create(Message())
+
+    asyncio.run(run())
+    assert "已清空" in replies[0]
+    assert memory_store.read(conversation) == []
+    assert memory_store.get_pending(conversation, "alice") is None
+    assert memory_store.read("c2c:bob")[0]["content"] == "其他用户记录"
+    assert PlayerRepository(players.file_path).get("小明") == 123
+
+
+def test_clear_invalid_arguments_preserve_history_and_pending(memory_store) -> None:
+    context = CommandContext(conversation_id="c2c:alice", speaker_id="alice")
+    memory_store.append("c2c:alice", "user", "保留记录")
+    memory_store.set_pending("c2c:alice", "alice", ("追踪术", []))
+    router = build_router()
+    assert router.dispatch("/clear extra", context) == "用法: /clear"
+    assert memory_store.read("c2c:alice")[0]["content"] == "保留记录"
+    assert memory_store.get_pending("c2c:alice", "alice") == ("追踪术", [])
+    assert router.dispatch("/clear") == "当前消息不包含有效会话标识。"
