@@ -8,9 +8,9 @@ import botpy
 from botpy.message import C2CMessage, GroupMessage
 
 from data_center import _log
-from lib.conversation_memory import ConversationMemory, get_memory_store
+from lib.conversation_memory import ConversationMemory
 # 保留旧模块的公开导入路径，避免部署扩展和已有调用方随职责拆分失效。
-from bootstrap import build_default_services
+from bootstrap import build_application
 from service.command_router import (
     BotServices,
     CommandContext,
@@ -18,10 +18,11 @@ from service.command_router import (
     CommandRouter,
     normalize_command_content,
 )
+from service.commands import HERO_COMMAND
 from service.hero_win_rate_report import HeroWinRateReportService
 from service.qq_command_discovery import QQCommandDiscoveryService
 
-PRIVATE_HERO_REPORT_COMMAND = "高胜率英雄"
+PRIVATE_HERO_REPORT_COMMAND = HERO_COMMAND.name
 HERO_REPORT_REPLY_TIMEOUT_SECONDS = 20.0
 HERO_REPORT_CACHE_SECONDS = 300.0
 
@@ -31,20 +32,17 @@ class MyClient(botpy.Client):
         self,
         *args,
         router: CommandRouter,
-        hero_win_rate_report: HeroWinRateReportService | None = None,
+        hero_win_rate_report: HeroWinRateReportService,
         command_discovery: QQCommandDiscoveryService | None = None,
         hero_report_reply_timeout: float = HERO_REPORT_REPLY_TIMEOUT_SECONDS,
-        memory_store: ConversationMemory | None = None,
+        memory_store: ConversationMemory,
         **kwargs,
     ) -> None:
         super().__init__(*args, **kwargs)
         self.router = router
-        self.memory_store = memory_store or get_memory_store()
-        # 收发记录和追问状态使用同一持久目录，测试或部署注入时也保持一致。
-        self.router.memory_store = self.memory_store
-        self.hero_win_rate_report = hero_win_rate_report or HeroWinRateReportService(
-            hero_name_resolver=self.router.services.resolve_hero_name
-        )
+        # 依赖由启动入口装配，不再修改路由或隐式创建另一个统计客户端。
+        self.memory_store = memory_store
+        self.hero_win_rate_report = hero_win_rate_report
         self.command_discovery = command_discovery or QQCommandDiscoveryService(
             self.api._http.request
         )
@@ -182,10 +180,13 @@ def start() -> None:
     if not app_id or not app_secret:
         raise RuntimeError("缺少 QQBOT_APP_ID 或 QQBOT_APP_SECRET 环境变量")
 
+    router, hero_report, memory_store = build_application()
     intents = botpy.Intents(public_messages=True)
     client = MyClient(
         intents=intents,
-        router=CommandRouter(),
+        router=router,
+        hero_win_rate_report=hero_report,
+        memory_store=memory_store,
         # 容器日志交给 stdout/stderr 和 Docker 收集，避免 SDK 在应用目录写日志文件。
         ext_handlers=False,
     )

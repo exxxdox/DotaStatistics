@@ -1,6 +1,11 @@
 import asyncio
 import json
 from typing import Any
+from types import SimpleNamespace
+
+import service.command_router as command_router
+import service.qq_command_discovery as command_discovery
+from service.commands import COMMANDS, Command
 
 from service.qq_command_discovery import (
     GROUP_PANEL_REMARK,
@@ -49,6 +54,28 @@ def test_payloads_expose_supported_private_and_group_commands() -> None:
         "简报",
         "群OpenID",
         "高胜率英雄",
+    }
+
+
+def test_shared_definition_updates_menu_help_and_dispatch(monkeypatch) -> None:
+    commands = (*COMMANDS, Command(
+        "新简报", "新简报", "新的简报入口", handler="_report", private_label="新简报",
+    ))
+    monkeypatch.setattr(command_router, "COMMANDS", commands)
+    monkeypatch.setattr(command_discovery, "COMMANDS", commands)
+    router = command_router.CommandRouter(SimpleNamespace(
+        list_player_nicknames=lambda: [], get_today_report=lambda: "比赛简报",
+    ), ai_enabled=False)
+
+    assert router.dispatch("新简报") == "比赛简报"
+    assert [line for line in router.dispatch("").splitlines() if line.startswith("@我 ")] == [
+        f"@我 {command.usage}" for command in commands
+    ]
+    assert build_group_panel()["items"][-1] == {
+        "type": "command", "name": "新简报", "desc": "新的简报入口", "only_admin": False,
+    }
+    assert build_private_menu()["menu"]["items"][1] == {
+        "name": "新简报", "type": "send_message", "send_message": "新简报",
     }
 
 

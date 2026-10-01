@@ -151,3 +151,16 @@ def test_permanent_players_survive_history_window_and_use_latest_ids(
     )
     data = client.chat.completions.create.call_args.kwargs["messages"][1]["content"]
     assert json.loads(data)["tracked_players"] == {"小明": 789}
+
+
+def test_general_chat_reads_injected_store_instead_of_global(monkeypatch, tmp_path) -> None:
+    injected = ConversationMemory(tmp_path / "injected")
+    injected.append("c2c:alice", "user", "来自注入目录的历史")
+    global_store = Mock(side_effect=AssertionError("must use injected memory"))
+    monkeypatch.setattr(deepseek_api, "get_memory_store", global_store)
+    client = build_client()
+    monkeypatch.setattr(deepseek_api, "get_client", lambda: client)
+    deepseek_api.deepseek_general("继续", "c2c:alice", memory_store=injected)
+    global_store.assert_not_called()
+    messages = client.chat.completions.create.call_args.kwargs["messages"]
+    assert messages[1] == {"role": "user", "content": "来自注入目录的历史"}

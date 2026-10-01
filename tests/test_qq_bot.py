@@ -9,7 +9,7 @@ import pytest
 from lib.conversation_memory import ConversationMemory
 
 import qq_bot
-from qq_bot import BotServices, CommandContext, CommandRouter, MyClient
+from qq_bot import BotServices, CommandContext, CommandRouter, MyClient as SDKClient
 
 
 def test_hero_report_reuses_pending_task_and_completed_result() -> None:
@@ -77,8 +77,15 @@ def test_hero_report_failure_allows_retry() -> None:
 def memory_store(tmp_path, monkeypatch) -> ConversationMemory:
     # SDK 回调真实执行压缩落盘，但测试不碰生产数据目录。
     store = ConversationMemory(tmp_path / "conversations")
-    monkeypatch.setattr(qq_bot, "get_memory_store", lambda: store)
+    monkeypatch.setattr(qq_bot, "test_memory_store", store, raising=False)
     return store
+
+
+def MyClient(*args, **kwargs):
+    # 测试显式装配替身，生产 SDK 不再隐式创建业务依赖。
+    kwargs.setdefault("memory_store", qq_bot.test_memory_store)
+    kwargs.setdefault("hero_win_rate_report", SimpleNamespace(build=lambda: "英雄榜"))
+    return SDKClient(*args, **kwargs)
 
 
 def build_router(**overrides) -> CommandRouter:
@@ -89,11 +96,10 @@ def build_router(**overrides) -> CommandRouter:
         "get_recent_matches": lambda dota_id: f"比赛:{dota_id}",
         "get_today_report": lambda: "今日简报",
         "chat": lambda message, _conversation_id, _before_id=None: f"AI:{message}",
-        "resolve_hero_name": lambda _hero_id: None,
         "list_player_nicknames": lambda: [],
     }
     defaults.update(overrides)
-    return CommandRouter(BotServices(**defaults))
+    return CommandRouter(BotServices(**defaults), memory_store=qq_bot.test_memory_store)
 
 
 def test_empty_message_returns_help() -> None:

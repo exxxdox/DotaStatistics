@@ -27,7 +27,12 @@ def test_default_router_assembles_services_without_live_integrations(
     monkeypatch.setattr(bootstrap, "OpenDotaApiClient", Mock(return_value=api_client))
     monkeypatch.setattr(bootstrap, "TodayReportService", Mock(return_value=today_report))
 
-    router = CommandRouter()
+    memory = Mock()
+    router, hero_report, assembled_memory = bootstrap.build_application(memory_store=memory)
+    assert assembled_memory is memory
+    assert router.memory_store is memory
+    assert hero_report.api_client is api_client
+    assert router.services.chat.keywords["memory_store"] is memory
 
     assert router.dispatch("撒情况 小明") == "比赛:123"
     api_client.get_recent_matches.assert_called_once_with(123)
@@ -54,4 +59,4 @@ def test_legacy_imports_keep_the_same_objects() -> None:
     assert qq_bot.BotServices is BotServices
     assert qq_bot.CommandContext is CommandContext
     assert qq_bot.CommandRouter is CommandRouter
-    assert qq_bot.build_default_services is bootstrap.build_default_services
+    assert qq_bot.build_application is bootstrap.build_application

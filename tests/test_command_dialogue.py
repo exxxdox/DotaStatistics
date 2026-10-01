@@ -13,7 +13,6 @@ def make_router(store, *, ask=None, saved=None, ai_enabled=True, bindings=None) 
         get_recent_matches=lambda dota_id: f"比赛:{dota_id}",
         get_today_report=lambda: "今日简报",
         chat=lambda message, _conversation_id, _before_id=None: f"AI:{message}",
-        resolve_hero_name=lambda _hero_id: None,
         list_player_nicknames=lambda: ["小明", "小红"],
         ask_command_parameter=ask,
         list_player_bindings=bindings,

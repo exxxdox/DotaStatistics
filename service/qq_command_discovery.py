@@ -4,82 +4,41 @@ from typing import Any
 
 from botpy.http import Route
 
+from service.commands import COMMANDS
+
 RequestCallable = Callable[..., Awaitable[Any]]
 GROUP_PANEL_REMARK = "DotaStatistics group commands"
 
 
 def build_private_menu() -> dict[str, Any]:
-    """生成单聊全局菜单；按钮名称遵守 QQ 的五个中文字符限制。"""
-    return {
-        "menu": {
-            "items": [
-                {
-                    "name": "help",
-                    "type": "menu",
-                    "sub_menu_items": [
-                        {
-                            "name": "追踪术",
-                            "type": "send_message",
-                            # 菜单只发送命令名，让路由返回参数提示；占位词不能
-                            # 被误当成用户真实输入传给业务处理函数。
-                            "send_message": "追踪术",
-                        },
-                        {
-                            "name": "撒情况",
-                            "type": "send_message",
-                            "send_message": "撒情况",
-                        },
-                    ],
-                },
-                {
-                    "name": "英雄胜率",
-                    "type": "send_message",
-                    "send_message": "高胜率英雄",
-                },
-                {
-                    "name": "今日简报",
-                    "type": "send_message",
-                    "send_message": "简报",
-                },
-            ]
-        }
-    }
+    """从共享定义生成菜单，按钮只发送命令名以触发参数追问。"""
+    help_items = [
+        {"name": command.private_label, "type": "send_message", "send_message": command.name}
+        for command in COMMANDS if command.private_in_help
+    ]
+    # QQ 既有菜单顶层按英雄榜、简报排列，群面板和帮助维持命令表顺序。
+    items = [
+        {"name": command.private_label, "type": "send_message", "send_message": command.name}
+        for command in reversed(COMMANDS)
+        if command.private_label and not command.private_in_help
+    ]
+    return {"menu": {"items": [
+        {"name": "help", "type": "menu", "sub_menu_items": help_items},
+        *items,
+    ]}}
 
 
 def build_group_panel() -> dict[str, Any]:
-    """生成所有群可见的指令面板，名称即用户点击后填入的指令。"""
+    """共享命令说明和群别名，保持 QQ 指令面板与帮助一致。"""
     return {
         "items": [
             {
                 "type": "command",
-                "name": "追踪术",
-                "desc": "绑定昵称和Dota ID",
+                "name": command.group_alias or command.name,
+                "desc": command.description,
                 "only_admin": False,
-            },
-            {
-                "type": "command",
-                "name": "撒情况",
-                "desc": "查询选手最近5场天梯比赛",
-                "only_admin": False,
-            },
-            {
-                "type": "command",
-                "name": "简报",
-                "desc": "生成今日比赛简报",
-                "only_admin": False,
-            },
-            {
-                "type": "command",
-                "name": "群OpenID",
-                "desc": "查看当前群OpenID",
-                "only_admin": False,
-            },
-            {
-                "type": "command",
-                "name": "高胜率英雄",
-                "desc": "查询近期英雄胜率榜",
-                "only_admin": False,
-            },
+            }
+            for command in COMMANDS
         ],
         "remark": GROUP_PANEL_REMARK,
     }

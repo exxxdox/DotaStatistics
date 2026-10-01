@@ -1,4 +1,4 @@
-"""DotaStatistics 入口：启动 QQ 机器人，依赖组装在 bootstrap.build_default_services 中完成。"""
+"""DotaStatistics 入口：启动 QQ 机器人，依赖组装在 bootstrap.build_application 中完成。"""
 
 import qq_bot
 

@@ -4,7 +4,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from data_center import _log, enable_ai
-from lib.conversation_memory import ConversationMemory, get_memory_store
+from lib.conversation_memory import ConversationMemory
+from service.commands import COMMANDS, GROUP_OPENID_COMMAND, TRACK_COMMAND
 
 CommandHandler = Callable[[list[str]], str]
 
@@ -37,7 +38,6 @@ class BotServices:
     get_recent_matches: Callable[[int], str | None]
     get_today_report: Callable[[], str]
     chat: Callable[[str, str, int | None], str]
-    resolve_hero_name: Callable[[int], str | None]
     list_player_nicknames: Callable[[], list[str]]
     ask_command_parameter: Callable[[str, str, str], str] | None = None
     list_player_bindings: Callable[[], dict[str, int]] | None = None
@@ -48,22 +48,16 @@ class CommandRouter:
 
     def __init__(
         self,
-        services: BotServices | None = None,
+        services: BotServices,
         ai_enabled: bool = enable_ai,
         memory_store: ConversationMemory | None = None,
     ) -> None:
-        if services is None:
-            # 仅默认启动时加载真实集成，让注入替身的路由不依赖网络和文件加载。
-            from bootstrap import build_default_services
-
-            services = build_default_services()
         self.services = services
         self.ai_enabled = ai_enabled
         self.memory_store = memory_store
         self._commands: dict[str, CommandHandler] = {
-            "追踪术": self._track,
-            "撒情况": self._recent_matches,
-            "简报": self._report,
+            command.name: getattr(self, command.handler)
+            for command in COMMANDS if command.handler is not None
         }
 
     def dispatch(self, content: str, context: CommandContext | None = None) -> str:
@@ -89,8 +83,8 @@ class CommandRouter:
             return self._help()
 
         if words[0].casefold() in {
-            "查看当前群openid".casefold(),
-            "群openid".casefold(),
+            GROUP_OPENID_COMMAND.name.casefold(),
+            GROUP_OPENID_COMMAND.group_alias.casefold(),
         }:
             if dialogue:
                 dialogue.set_pending(context.conversation_id, context.speaker_id, None)
@@ -101,12 +95,12 @@ class CommandRouter:
             if dialogue:
                 # 新命令替换旧追问，避免用户被之前的参数填写流程困住。
                 dialogue.set_pending(context.conversation_id, context.speaker_id, None)
-            if words[0] in {"追踪术", "撒情况"}:
+            if any(command.name == words[0] and " " in command.usage for command in COMMANDS):
                 return self._parameter_command(words[0], words[1:], context)
             return handler(words[1:])
         if pending:
             command, saved_args = pending
-            expected_count = 2 if command == "追踪术" else 1
+            expected_count = len(next(item.usage.split() for item in COMMANDS if item.name == command)) - 1
             # 支持只补下一个参数，也允许直接重发一整组参数修正昵称。
             args = words if len(words) == expected_count else saved_args + words
             return self._parameter_command(command, args, context)
@@ -129,12 +123,12 @@ class CommandRouter:
         if context is None or not context.conversation_id or not context.speaker_id:
             return None
         # 仅参数追问需要状态；存储对象没有常驻对话缓存。
-        return self.memory_store or get_memory_store()
+        return self.memory_store
 
     def _parameter_command(
         self, command: str, args: list[str], context: CommandContext | None
     ) -> str:
-        expected_count = 2 if command == "追踪术" else 1
+        expected_count = len(next(item.usage.split() for item in COMMANDS if item.name == command)) - 1
         if args in (["昵称"], ["昵称", "dotaId"]):
             args = []
         reason = ""
@@ -147,7 +141,7 @@ class CommandRouter:
         field = "昵称"
         if args:
             field = "dotaId"
-            if command == "追踪术" and len(args) == 2:
+            if command == TRACK_COMMAND.name and len(args) == 2:
                 try:
                     valid_id = 0 < int(args[1]) and len(args[1]) <= 256
                 except ValueError:
@@ -173,7 +167,7 @@ class CommandRouter:
                     f"{nickname}（Dota ID：{dota_id}）"
                     for nickname, dota_id in bindings.items()
                 )
-                if bindings else "\n尚未记录选手，请先使用：追踪术 昵称 dotaId。"
+                if bindings else f"\n尚未记录选手，请先使用：{TRACK_COMMAND.usage}。"
             )
         if self.ai_enabled and self.services.ask_command_parameter is not None:
             try:
@@ -199,20 +193,18 @@ class CommandRouter:
         self, args: list[str], context: CommandContext | None
     ) -> str:
         if args:
-            return "用法: 查看当前群OpenID"
+            return f"用法: {GROUP_OPENID_COMMAND.usage}"
         if context is None or not context.group_openid:
             return "当前消息不包含群 OpenID。"
         return f"当前群 OpenID：{context.group_openid}"
 
     def _help(self) -> str:
         players = " ".join(self.services.list_player_nicknames())
+        # 与指令面板使用同一名单；删除命令时帮助也同步移除。
+        commands = "".join(f"@我 {command.usage}\n" for command in COMMANDS)
         return (
             "\n指令列表:\n"
-            "@我 追踪术 昵称 dotaId\n"
-            "@我 撒情况 昵称\n"
-            "@我 简报\n"
-            "@我 查看当前群OpenID\n"
-            "@我 高胜率英雄\n"
+            f"{commands}"
             "或者单纯地@我随便聊聊\n"
             f"斗兽场中的选手是: {players}"
         )
