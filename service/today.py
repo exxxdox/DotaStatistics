@@ -21,15 +21,16 @@ class TodayReportService:
         self.analyzer = analyzer
 
     def build(self) -> str:
-        result = f"根据距今{24}小时的数据分析\n"
-        ai_request_str = ""
+        result = "根据距今24小时的数据分析\n"
+        # 收集后一次拼接，避免逐个选手追加时反复复制已有报告内容。
+        player_reports: list[str] = []
         for nickname in self.players.nicknames():
             dota_id = self.players.get(nickname)
             if dota_id is None:
                 continue
             recent_matches = self.api_client.get_matches_by_date(dota_id, 1)
             if recent_matches:
-                ai_request_str += (
+                player_reports.append(
                     f"{nickname}，id为{dota_id} 的近期数据是\n{recent_matches}"
                 )
-        return result + self.analyzer(ai_request_str)
+        return result + self.analyzer("".join(player_reports))
