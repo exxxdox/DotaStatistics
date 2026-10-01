@@ -2,7 +2,8 @@
 
 FROM ghcr.io/astral-sh/uv:0.12.19 AS uv
 
-FROM python:3.12-slim-bookworm AS builder
+# Alpine 缩小基础层；构建与运行使用同一 musl 环境，避免二进制依赖不兼容。
+FROM python:3.12-alpine AS builder
 
 ENV UV_LINK_MODE=copy \
     UV_PYTHON_DOWNLOADS=0
@@ -16,7 +17,7 @@ COPY pyproject.toml uv.lock README.md ./
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev --no-install-project
 
-FROM python:3.12-slim-bookworm AS runtime
+FROM python:3.12-alpine AS runtime
 
 ENV DATA_DIR=/data \
     PATH="/app/.venv/bin:$PATH" \
@@ -26,13 +27,14 @@ ENV DATA_DIR=/data \
 WORKDIR /app
 
 # 固定 UID/GID 便于持久卷保留明确的文件所有权，并避免以 root 运行机器人。
-RUN groupadd --gid 10001 bot \
-    && useradd --uid 10001 --gid bot --system --no-create-home bot \
+RUN addgroup -g 10001 -S bot \
+    && adduser -u 10001 -G bot -S -D -H bot \
     && mkdir --parents /data \
     && chown bot:bot /data
 
 COPY --from=builder /app/.venv /app/.venv
-COPY --chown=bot:bot main.py qq_bot.py data_center.py ./
+# 依赖装配已拆到 bootstrap，运行镜像必须一起携带，否则入口导入会失败。
+COPY --chown=bot:bot main.py qq_bot.py data_center.py bootstrap.py ./
 COPY --chown=bot:bot lib ./lib
 COPY --chown=bot:bot service ./service
 COPY --chown=bot:bot res/hero_name.xlsx ./res/hero_name.xlsx

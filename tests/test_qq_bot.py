@@ -1,5 +1,6 @@
 import asyncio
 import time
+from threading import Event
 from types import SimpleNamespace
 
 import botpy
@@ -9,6 +10,67 @@ from lib.conversation_memory import ConversationMemory
 
 import qq_bot
 from qq_bot import BotServices, CommandContext, CommandRouter, MyClient
+
+
+def test_hero_report_reuses_pending_task_and_completed_result() -> None:
+    release = Event()
+    calls = []
+
+    def build() -> str:
+        calls.append(True)
+        assert release.wait(3)
+        return "真实胜率榜"
+
+    async def run() -> None:
+        bot = MyClient(
+            router=build_router(),
+            hero_win_rate_report=SimpleNamespace(build=build),
+            hero_report_reply_timeout=0.02,
+            intents=botpy.Intents(public_messages=True),
+            ext_handlers=False,
+        )
+        try:
+            replies = await asyncio.gather(
+                bot._build_hero_report_with_deadline(),
+                bot._build_hero_report_with_deadline(),
+            )
+            assert len(calls) == 1
+            assert replies == ["英雄胜率数据正在更新，请稍后再次查询。"] * 2
+        finally:
+            release.set()
+            await bot._hero_report_task
+        assert await bot._build_hero_report_with_deadline() == "真实胜率榜"
+        assert len(calls) == 1
+        # 完整结果只短暂复用，过期后重新生成，避免榜单长期固定。
+        bot._hero_report_completed_at -= qq_bot.HERO_REPORT_CACHE_SECONDS
+        assert await bot._build_hero_report_with_deadline() == "真实胜率榜"
+        assert len(calls) == 2
+
+    asyncio.run(run())
+
+
+def test_hero_report_failure_allows_retry() -> None:
+    calls = []
+
+    def build() -> str:
+        calls.append(True)
+        if len(calls) == 1:
+            raise RuntimeError("refresh failed")
+        return "恢复后的榜单"
+
+    async def run() -> None:
+        bot = MyClient(
+            router=build_router(),
+            hero_win_rate_report=SimpleNamespace(build=build),
+            intents=botpy.Intents(public_messages=True),
+            ext_handlers=False,
+        )
+        with pytest.raises(RuntimeError, match="refresh failed"):
+            await bot._build_hero_report_with_deadline()
+        assert await bot._build_hero_report_with_deadline() == "恢复后的榜单"
+        assert len(calls) == 2
+
+    asyncio.run(run())
 
 
 @pytest.fixture(autouse=True)
@@ -25,7 +87,6 @@ def build_router(**overrides) -> CommandRouter:
         "set_dota_id": lambda _nickname, _dota_id: None,
         "get_dota_id": lambda nickname: 123 if nickname == "小明" else None,
         "get_recent_matches": lambda dota_id: f"比赛:{dota_id}",
-        "get_player_wl": lambda _dota_id, _days: (2, 1),
         "get_today_report": lambda: "今日简报",
         "chat": lambda message, _conversation_id, _before_id=None: f"AI:{message}",
         "resolve_hero_name": lambda _hero_id: None,
@@ -52,7 +113,7 @@ def test_known_commands_are_dispatched() -> None:
     router = build_router()
 
     assert router.dispatch("撒情况 小明") == "比赛:123"
-    assert router.dispatch("今儿 小明") == "胜:2, 败:1"
+    assert router.dispatch("撒情况 小明") == "比赛:123"
     assert router.dispatch("简报") == "今日简报"
 
 
@@ -60,7 +121,7 @@ def test_command_panel_slash_prefix_is_ignored() -> None:
     router = build_router()
 
     assert router.dispatch("/撒情况 小明") == "比赛:123"
-    assert router.dispatch("／今儿 小明") == "胜:2, 败:1"
+    assert router.dispatch("／撒情况 小明") == "比赛:123"
     assert router.dispatch(" /简报 ") == "今日简报"
     assert router.dispatch(
         "/群OpenID", CommandContext(group_openid="group-openid")
@@ -72,8 +133,8 @@ def test_command_errors_ask_for_parameters_without_general_chat() -> None:
 
     assert "请直接回复昵称" in router.dispatch("追踪术")
     assert "请直接回复昵称" in router.dispatch("撒情况")
-    assert "请直接回复昵称" in router.dispatch("今儿")
-    assert router.dispatch("今儿 陌生人") == "还没有追踪选手「陌生人」。"
+    assert "请直接回复昵称" in router.dispatch("撒情况")
+    assert router.dispatch("撒情况 陌生人") == "还没有追踪选手「陌生人」。"
 
 
 def test_legacy_menu_placeholders_are_treated_as_missing_arguments() -> None:
@@ -81,7 +142,7 @@ def test_legacy_menu_placeholders_are_treated_as_missing_arguments() -> None:
 
     assert "请直接回复昵称" in router.dispatch("追踪术 昵称 dotaId")
     assert "请直接回复昵称" in router.dispatch("撒情况 昵称")
-    assert "请直接回复昵称" in router.dispatch("今儿 昵称")
+    assert "请直接回复昵称" in router.dispatch("撒情况 昵称")
 
 
 def test_unknown_message_uses_configured_fallback() -> None:
@@ -111,7 +172,7 @@ def test_group_openid_command_requires_group_context() -> None:
 
 def test_group_hero_report_replies_to_current_request() -> None:
     class FakeWeeklyReport:
-        def build(self) -> str:
+        def build(self, ) -> str:
             return "当前英雄胜率榜"
 
     class FakeMessage:
@@ -151,7 +212,7 @@ def test_group_hero_report_replies_to_current_request() -> None:
 
 def test_slow_group_hero_report_replies_before_background_update_finishes(memory_store) -> None:
     class SlowWeeklyReport:
-        def build(self) -> str:
+        def build(self, ) -> str:
             time.sleep(0.05)
             return "后台生成的英雄胜率榜"
 
@@ -231,7 +292,7 @@ def test_private_hero_report_keyword_replies_to_requester() -> None:
     ai_calls: list[tuple[str, str]] = []
 
     class FakeWeeklyReport:
-        def build(self) -> str:
+        def build(self, ) -> str:
             return "当前全分段英雄胜率 Top 10"
 
     class FakeMessage:
@@ -349,7 +410,7 @@ def test_every_received_message_and_generated_reply_is_persisted(
     async def run() -> None:
         client = MyClient(
             router=build_router(chat=chat),
-            hero_win_rate_report=SimpleNamespace(build=lambda: "英雄胜率榜"),
+            hero_win_rate_report=SimpleNamespace(build=lambda : "英雄胜率榜"),
             intents=botpy.Intents(public_messages=True),
             ext_handlers=False,
         )
@@ -432,7 +493,7 @@ def test_storage_failure_does_not_process_unrecorded_input(monkeypatch) -> None:
         client = MyClient(
             router=router,
             memory_store=store,
-            hero_win_rate_report=SimpleNamespace(build=lambda: "榜单"),
+            hero_win_rate_report=SimpleNamespace(build=lambda : "榜单"),
             intents=botpy.Intents(public_messages=True),
             ext_handlers=False,
         )
@@ -522,21 +583,21 @@ def test_sdk_group_parameter_state_is_per_member_and_hero_command_cancels(memory
     async def run() -> None:
         bot = MyClient(
             router=build_router(),
-            hero_win_rate_report=SimpleNamespace(build=lambda: "英雄榜"),
+            hero_win_rate_report=SimpleNamespace(build=lambda : "英雄榜"),
             intents=botpy.Intents(public_messages=True),
             ext_handlers=False,
         )
         for content, member in (
-            ("今儿", "alice"),
+            ("撒情况", "alice"),
             ("小明", "bob"),
             ("小明", "alice"),
-            ("今儿", "alice"),
+            ("撒情况", "alice"),
             ("高胜率英雄", "alice"),
             ("小明", "alice"),
         ):
             await bot.on_group_at_message_create(FakeMessage(content, member))
 
     asyncio.run(run())
-    assert replies[1:3] == ["AI:小明", "胜:2, 败:1"]
+    assert replies[1:3] == ["AI:小明", "比赛:123"]
     assert replies[-2:] == ["英雄榜", "AI:小明"]
     assert memory_store.get_pending("group:group-a", "alice") is None

@@ -27,7 +27,6 @@ def build_default_services() -> BotServices:
         set_dota_id=players.set,
         get_dota_id=players.get,
         get_recent_matches=api_client.get_recent_matches,
-        get_player_wl=api_client.get_player_wl,
         get_today_report=today_report.build,
         # 绑定读取函数而非启动时的名单，既复用持久资料，又避免AI使用过期ID。
         chat=partial(deepseek_general, player_bindings=players.bindings),

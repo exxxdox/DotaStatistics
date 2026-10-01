@@ -1,5 +1,8 @@
+import json
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from threading import Event
 from typing import Any
 
 import pytest
@@ -177,6 +180,106 @@ def test_refresh_failure_uses_recent_complete_snapshot() -> None:
         cache_path.with_suffix(".json.tmp").unlink(missing_ok=True)
 
 
+def test_daily_cache_survives_interrupted_backfill(tmp_path: Path) -> None:
+    fixed_now = datetime(2026, 8, 27, 12, tzinfo=timezone.utc)
+    cache_path = tmp_path / "hero_stats.json"
+    client = OpenDotaApiClient(cache_path=cache_path, now=lambda: fixed_now)
+    client._set_current_stats_period()
+    dates = client._target_dates()
+    rows = [{"hero_id": 1, "games": 10, "wins": 6}]
+    snapshot = {
+        "cached_at": fixed_now.timestamp(),
+        "period_start": "2026-07-27",
+        "period_end": "2026-08-25",
+        "data": [{"hero_id": 1, "games": 300, "wins": 180}],
+    }
+    client._save_cache_document({
+        "version": 2,
+        "days": {day.isoformat(): rows for day in dates[:-2]},
+        "snapshot": snapshot,
+    })
+    saved = Event()
+    blocked = Event()
+    release = Event()
+    original_save = client._save_cache_document
+
+    def save(document: dict[str, Any]) -> None:
+        original_save(document)
+        saved.set()
+
+    def fetch(day: date) -> list[dict[str, Any]]:
+        if day == dates[-2]:
+            return rows
+        blocked.set()
+        assert release.wait(5), "测试必须释放阻塞请求"
+        raise RuntimeError("模拟刷新意外中断")
+
+    client._save_cache_document = save  # type: ignore[method-assign]
+    client._fetch_daily_stats = fetch  # type: ignore[method-assign]
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(client.get_recent_month_win_rate_leaders)
+        try:
+            assert blocked.wait(5)
+            assert saved.wait(5), "后续请求仍阻塞时，成功日必须已落盘"
+            document = json.loads(cache_path.read_text(encoding="utf-8"))
+            assert dates[-2].isoformat() in document["days"]
+            assert dates[-1].isoformat() not in document["days"]
+            assert document["snapshot"] == snapshot
+        finally:
+            release.set()
+        with pytest.raises(RuntimeError, match="模拟刷新意外中断"):
+            future.result(timeout=5)
+
+    resumed = OpenDotaApiClient(cache_path=cache_path, now=lambda: fixed_now)
+    calls: list[date] = []
+
+    def resume_fetch(day: date) -> list[dict[str, Any]]:
+        calls.append(day)
+        return rows
+
+    resumed._fetch_daily_stats = resume_fetch  # type: ignore[method-assign]
+    assert resumed.get_recent_month_win_rate_leaders()[0].games == 300
+    assert calls == [dates[-1]]
+    assert resumed._load_cache_document()["snapshot"]["period_end"] == "2026-08-26"
+
+
+@pytest.mark.parametrize("workers", [1, 3])
+def test_daily_checkpoint_rejects_failed_and_invalid_days(
+    tmp_path: Path, workers: int,
+) -> None:
+    fixed_now = datetime(2026, 8, 27, 12, tzinfo=timezone.utc)
+    client = OpenDotaApiClient(
+        cache_path=tmp_path / "hero_stats.json",
+        refresh_workers=workers,
+        now=lambda: fixed_now,
+    )
+    client._set_current_stats_period()
+    dates = client._target_dates()
+    rows = [{"hero_id": 1, "games": 10, "wins": 6}]
+    client._save_cache_document({
+        "version": 2,
+        "days": {day.isoformat(): rows for day in dates[:-3]},
+        "snapshot": None,
+    })
+
+    def fetch(day: date) -> list[dict[str, Any]]:
+        if day == dates[-3]:
+            return rows
+        if day == dates[-2]:
+            return [{"hero_id": 1, "games": 5, "wins": 6}]
+        raise OpenDotaApiError("查询失败")
+
+    client._fetch_daily_stats = fetch  # type: ignore[method-assign]
+    with pytest.raises(OpenDotaApiError):
+        client.get_recent_month_win_rate_leaders()
+
+    document = client._load_cache_document()
+    assert len(document["days"]) == 28
+    assert document["days"][dates[-3].isoformat()] == rows
+    assert all(day.isoformat() not in document["days"] for day in dates[-2:])
+    assert document["snapshot"] is None
+
+
 def test_monthly_stats_reject_invalid_limits_and_rows() -> None:
     client = OpenDotaApiClient(cache_path=None)
     with pytest.raises(ValueError):
@@ -238,6 +341,16 @@ def test_get_player_wl_returns_none_on_api_error() -> None:
     )
 
     assert client.get_player_wl(123, 1) is None
+
+
+def test_recent_matches_default_returns_five_ranked_games() -> None:
+    ranked = {"game_mode": 22, "hero_id": 1, "radiant_win": True, "player_slot": 0}
+    client = OpenDotaApiClient(
+        session=FakeSession([FakeResponse(200, [{"game_mode": 23}] + [ranked] * 6)]),
+        max_retries=0,
+        cache_path=None,
+    )
+    assert client.get_recent_matches(123).count("英雄:英雄 1") == 5
 
 
 def test_get_recent_matches_filters_non_ranked_and_limits() -> None:

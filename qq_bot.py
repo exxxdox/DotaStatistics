@@ -2,6 +2,7 @@
 
 import asyncio
 import os
+from datetime import date, datetime, timezone
 
 import botpy
 from botpy.message import C2CMessage, GroupMessage
@@ -22,6 +23,7 @@ from service.qq_command_discovery import QQCommandDiscoveryService
 
 PRIVATE_HERO_REPORT_COMMAND = "高胜率英雄"
 HERO_REPORT_REPLY_TIMEOUT_SECONDS = 20.0
+HERO_REPORT_CACHE_SECONDS = 300.0
 
 
 class MyClient(botpy.Client):
@@ -48,6 +50,9 @@ class MyClient(botpy.Client):
         )
         self.hero_report_reply_timeout = hero_report_reply_timeout
         self._background_report_tasks: set[asyncio.Task[str]] = set()
+        self._hero_report_task: asyncio.Task[str] | None = None
+        self._hero_report_completed_at = 0.0
+        self._hero_report_day: date | None = None
         self._command_discovery_configured = False
 
     async def on_ready(self) -> None:
@@ -137,25 +142,35 @@ class MyClient(botpy.Client):
         _log.info(f"消息回复成功: message_id={getattr(result, 'id', None)}")
 
     async def _build_hero_report_with_deadline(self) -> str:
-        """避免首次回填耗尽 QQ 原消息的可回复时间。"""
-        task = asyncio.create_task(asyncio.to_thread(self.hero_win_rate_report.build))
-        self._background_report_tasks.add(task)
+        """复用统计刷新与近期结果，避免重复查询启动另一批上游请求。"""
+        loop = asyncio.get_running_loop()
+        today = datetime.now(timezone.utc).date()
+        task = self._hero_report_task
+        if task is None or (task.done() and (
+            task.cancelled() or task.exception() is not None
+            or self._hero_report_day != today
+            or loop.time() - self._hero_report_completed_at >= HERO_REPORT_CACHE_SECONDS
+        )):
+            task = asyncio.create_task(asyncio.to_thread(self.hero_win_rate_report.build))
+            self._hero_report_task = task
+            self._hero_report_day = today
+            self._background_report_tasks.add(task)
+            task.add_done_callback(self._finish_background_report)
         try:
-            result = await asyncio.wait_for(
+            return await asyncio.wait_for(
                 asyncio.shield(task), timeout=self.hero_report_reply_timeout
             )
-            self._background_report_tasks.discard(task)
-            return result
         except TimeoutError:
-            # 不取消线程，让逐日统计继续写入缓存；用户稍后主动查询即可命中缓存。
-            task.add_done_callback(self._finish_background_report)
+            # 保留同一任务继续逐日落盘，重试不会启动另一批查询。
             return "英雄胜率数据正在更新，请稍后再次查询。"
-        except Exception:
-            self._background_report_tasks.discard(task)
-            raise
 
     def _finish_background_report(self, task: asyncio.Task[str]) -> None:
         self._background_report_tasks.discard(task)
+        if task is self._hero_report_task:
+            # 完成的 Task 保留完整报表，随后请求可立即复用；跨 UTC 日会失效。
+            self._hero_report_completed_at = asyncio.get_running_loop().time()
+        if task.cancelled():
+            return
         try:
             task.result()
         except Exception:

@@ -29,11 +29,6 @@ def build_private_menu() -> dict[str, Any]:
                             "type": "send_message",
                             "send_message": "撒情况",
                         },
-                        {
-                            "name": "今儿",
-                            "type": "send_message",
-                            "send_message": "今儿",
-                        },
                     ],
                 },
                 {
@@ -64,13 +59,7 @@ def build_group_panel() -> dict[str, Any]:
             {
                 "type": "command",
                 "name": "撒情况",
-                "desc": "查询选手近期比赛",
-                "only_admin": False,
-            },
-            {
-                "type": "command",
-                "name": "今儿",
-                "desc": "查询选手今日战绩",
+                "desc": "查询选手最近5场天梯比赛",
                 "only_admin": False,
             },
             {

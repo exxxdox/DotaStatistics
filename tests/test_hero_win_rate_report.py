@@ -26,16 +26,9 @@ def test_report_formats_all_rank_top_ten_without_positions() -> None:
         HeroWinRateStat(2, "Axe", 150, 75),
     ]
     client = StubOpenDotaClient(stats)
-    analysis_inputs: list[str] = []
-
-    def analyze(prompt: str) -> str:
-        analysis_inputs.append(prompt)
-        return "1号位：敌法师（60.00%，200场）- 后期核心。"
-
     service = HeroWinRateReportService(
         api_client=client,
         hero_name_resolver=lambda hero_id: "敌法师" if hero_id == 1 else None,
-        recommendation_analyzer=analyze,
         min_games=100,
     )
 
@@ -46,13 +39,10 @@ def test_report_formats_all_rank_top_ten_without_positions() -> None:
     assert "OpenDota public_matches 公开比赛样本" in report
     assert "1.敌法师 60.0%（200场）" in report
     assert "2.Axe 50.0%（150场）" in report
-    assert "DeepSeek 1—5号位推荐（基于常见定位分析）" in report
-    assert "1号位：敌法师" in report
+    assert "DeepSeek" not in report
+    assert "推荐" not in report
     assert client.arguments is not None
-    assert client.arguments == (40, 100)
-    assert len(analysis_inputs) == 1
-    assert "敌法师：胜率 60.00%，200 场" in analysis_inputs[0]
-    assert "Axe：胜率 50.00%，150 场" in analysis_inputs[0]
+    assert client.arguments == (10, 100)
 
 
 def test_report_marks_cached_open_dota_data() -> None:
@@ -64,16 +54,20 @@ def test_report_marks_cached_open_dota_data() -> None:
     assert "当前展示最近一次成功缓存" in report
 
 
-def test_report_keeps_objective_stats_when_deepseek_fails() -> None:
-    client = StubOpenDotaClient([HeroWinRateStat(1, "Anti-Mage", 200, 120)])
+def test_report_is_capped_at_ten_rows() -> None:
+    client = StubOpenDotaClient([
+        HeroWinRateStat(index, f"Hero {index}", 200, 120)
+        for index in range(1, 12)
+    ])
 
-    def fail_analysis(_: str) -> str:
-        raise RuntimeError("DeepSeek unavailable")
+    report = HeroWinRateReportService(api_client=client).build()
 
-    report = HeroWinRateReportService(
-        api_client=client,
-        recommendation_analyzer=fail_analysis,
-    ).build()
+    assert "10.Hero 10" in report
+    assert "11.Hero 11" not in report
 
-    assert "1.Anti-Mage 60.0%（200场）" in report
-    assert "DeepSeek 推荐暂不可用，请稍后再试。" in report
+
+def test_empty_statistics_report_has_no_ai_analysis() -> None:
+    report = HeroWinRateReportService(api_client=StubOpenDotaClient([])).build()
+
+    assert "当前统计周期样本不足。" in report
+    assert "DeepSeek" not in report

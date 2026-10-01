@@ -42,12 +42,10 @@ def test_payloads_expose_supported_private_and_group_commands() -> None:
     assert help_messages == {
         "追踪术",
         "撒情况",
-        "今儿",
     }
     assert group_commands == {
         "追踪术",
         "撒情况",
-        "今儿",
         "简报",
         "群OpenID",
         "高胜率英雄",

@@ -30,6 +30,7 @@ def test_default_router_assembles_services_without_live_integrations(
     router = CommandRouter()
 
     assert router.dispatch("撒情况 小明") == "比赛:123"
+    api_client.get_recent_matches.assert_called_once_with(123)
     assert router.dispatch("简报") == "今日简报"
     assert router.services.chat.func is bootstrap.deepseek_general
     assert router.services.chat.keywords["player_bindings"] == players.bindings

@@ -19,6 +19,7 @@ def build_client(response_content: str = "回答") -> Mock:
     client.chat.completions.create.return_value = SimpleNamespace(
         choices=[SimpleNamespace(message=SimpleNamespace(content=response_content))]
     )
+    client.with_options.return_value = client
     return client
 
 
@@ -32,6 +33,7 @@ def test_dota_analysis_uses_flash_thinking_mode(monkeypatch) -> None:
     assert arguments["model"] == "deepseek-v4-flash"
     assert arguments["reasoning_effort"] == "high"
     assert arguments["extra_body"] == {"thinking": {"type": "enabled"}}
+    client.with_options.assert_not_called()
 
 
 def test_empty_completion_content_returns_empty_string(monkeypatch) -> None:
@@ -40,23 +42,6 @@ def test_empty_completion_content_returns_empty_string(monkeypatch) -> None:
     monkeypatch.setattr(deepseek_api, "get_client", lambda: client)
 
     assert deepseek_api.deepseek_dota_analyze("比赛数据") == ""
-
-
-def test_hero_recommendations_use_stats_and_flash_thinking(monkeypatch) -> None:
-    client = build_client("1号位：敌法师")
-    monkeypatch.setattr(deepseek_api, "get_client", lambda: client)
-
-    assert deepseek_api.deepseek_hero_recommendations("英雄候选数据") == "1号位：敌法师"
-
-    arguments = client.chat.completions.create.call_args.kwargs
-    assert arguments["model"] == "deepseek-v4-flash"
-    assert arguments["reasoning_effort"] == "high"
-    assert arguments["extra_body"] == {"thinking": {"type": "enabled"}}
-    assert "1至5号位" in arguments["messages"][0]["content"]
-    assert arguments["messages"][1] == {
-        "role": "user",
-        "content": "英雄候选数据",
-    }
 
 
 def test_general_chat_uses_flash_without_thinking(monkeypatch, memory_store) -> None:
@@ -69,6 +54,7 @@ def test_general_chat_uses_flash_without_thinking(monkeypatch, memory_store) -> 
     assert arguments["model"] == "deepseek-v4-flash"
     assert "reasoning_effort" not in arguments
     assert arguments["extra_body"] == {"thinking": {"type": "disabled"}}
+    client.with_options.assert_not_called()
 
 
 def test_general_chat_memory_is_isolated_by_conversation(monkeypatch, memory_store) -> None:
@@ -125,6 +111,7 @@ def test_parameter_question_uses_short_nonthinking_request_without_history(monke
         "command": "追踪术", "field": "dotaId", "reason": "dotaId 必须是正整数。"
     }
     memory.assert_not_called()
+    client.with_options.assert_not_called()
 
 
 def test_permanent_players_survive_history_window_and_use_latest_ids(
@@ -160,7 +147,7 @@ def test_permanent_players_survive_history_window_and_use_latest_ids(
 
     restarted = PlayerRepository(players.file_path)
     deepseek_api.deepseek_command_question(
-        "今儿", "昵称", "", player_bindings=restarted.bindings
+        "撒情况", "昵称", "", player_bindings=restarted.bindings
     )
     data = client.chat.completions.create.call_args.kwargs["messages"][1]["content"]
     assert json.loads(data)["tracked_players"] == {"小明": 789}

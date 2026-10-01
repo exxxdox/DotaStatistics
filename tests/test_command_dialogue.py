@@ -11,7 +11,6 @@ def make_router(store, *, ask=None, saved=None, ai_enabled=True, bindings=None) 
         set_dota_id=lambda nickname, dota_id: saved.append((nickname, dota_id)),
         get_dota_id={"小明": 123, "小红": 456}.get,
         get_recent_matches=lambda dota_id: f"比赛:{dota_id}",
-        get_player_wl=lambda _dota_id, _days: (2, 1),
         get_today_report=lambda: "今日简报",
         chat=lambda message, _conversation_id, _before_id=None: f"AI:{message}",
         resolve_hero_name=lambda _hero_id: None,
@@ -30,6 +29,15 @@ def store(tmp_path) -> ConversationMemory:
 PRIVATE_CONTEXT = CommandContext(conversation_id="c2c:alice", speaker_id="alice")
 
 
+def test_removed_command_and_legacy_pending_state_use_normal_chat(store) -> None:
+    router = make_router(store)
+    store.set_pending("c2c:alice", "alice", ("今儿", []))
+    assert router.dispatch("小明", PRIVATE_CONTEXT) == "AI:小明"
+    assert store.get_pending("c2c:alice", "alice") is None
+    assert router.dispatch("今儿 小明", PRIVATE_CONTEXT) == "AI:今儿 小明"
+    assert "今儿" not in router.dispatch("")
+
+
 def test_track_asks_each_missing_parameter_and_survives_restart(store) -> None:
     saved = []
     ask = Mock(side_effect=lambda command, field, reason: f"问：{field}")
@@ -44,7 +52,7 @@ def test_track_asks_each_missing_parameter_and_survives_restart(store) -> None:
     assert restarted.dispatch("你好", PRIVATE_CONTEXT) == "AI:你好"
 
 
-@pytest.mark.parametrize("command,expected", [("今儿", "胜:2, 败:1"), ("撒情况", "比赛:123")])
+@pytest.mark.parametrize("command,expected", [("撒情况", "比赛:123")])
 def test_player_commands_execute_after_nickname_answer(store, command, expected) -> None:
     router = make_router(store)
     assert "请直接回复昵称" in router.dispatch(command, PRIVATE_CONTEXT)
@@ -77,11 +85,11 @@ def test_group_member_and_private_user_dialogues_are_isolated(store) -> None:
     alice = CommandContext(conversation_id="group:room", speaker_id="alice")
     bob = CommandContext(conversation_id="group:room", speaker_id="bob")
     other_group = CommandContext(conversation_id="group:other", speaker_id="alice")
-    router.dispatch("今儿", alice)
+    router.dispatch("撒情况", alice)
     assert router.dispatch("小明", bob) == "AI:小明"
     assert router.dispatch("小明", other_group) == "AI:小明"
     assert router.dispatch("小明", PRIVATE_CONTEXT) == "AI:小明"
-    assert router.dispatch("小明", alice) == "胜:2, 败:1"
+    assert router.dispatch("小明", alice) == "比赛:123"
 
 
 def test_cancel_and_new_command_replace_pending_form(store) -> None:
@@ -90,7 +98,7 @@ def test_cancel_and_new_command_replace_pending_form(store) -> None:
     assert router.dispatch("取消", PRIVATE_CONTEXT) == "已取消这次参数填写。"
     assert router.dispatch("小明", PRIVATE_CONTEXT) == "AI:小明"
     router.dispatch("追踪术 小明", PRIVATE_CONTEXT)
-    assert router.dispatch("今儿 小红", PRIVATE_CONTEXT) == "胜:2, 败:1"
+    assert router.dispatch("撒情况 小红", PRIVATE_CONTEXT) == "比赛:456"
     assert store.get_pending("c2c:alice", "alice") is None
 
 
@@ -100,8 +108,8 @@ def test_ai_failure_empty_answer_or_disabled_uses_working_fallback(store, disabl
     if not disabled and not empty:
         ask.side_effect = RuntimeError("AI unavailable")
     router = make_router(store, ask=ask, ai_enabled=not disabled)
-    assert "请直接回复昵称" in router.dispatch("今儿", PRIVATE_CONTEXT)
-    assert router.dispatch("小明", PRIVATE_CONTEXT) == "胜:2, 败:1"
+    assert "请直接回复昵称" in router.dispatch("撒情况", PRIVATE_CONTEXT)
+    assert router.dispatch("小明", PRIVATE_CONTEXT) == "比赛:123"
     if disabled:
         ask.assert_not_called()
 
@@ -109,9 +117,9 @@ def test_ai_failure_empty_answer_or_disabled_uses_working_fallback(store, disabl
 def test_valid_command_never_calls_ai_and_no_context_never_creates_shared_state(store) -> None:
     ask = Mock(return_value="问题")
     router = make_router(store, ask=ask)
-    assert router.dispatch("今儿 小明", PRIVATE_CONTEXT) == "胜:2, 败:1"
+    assert router.dispatch("撒情况 小明", PRIVATE_CONTEXT) == "比赛:123"
     ask.assert_not_called()
-    assert router.dispatch("今儿") == "问题"
+    assert router.dispatch("撒情况") == "问题"
     assert not list(store.root.iterdir())
 
 
@@ -122,7 +130,7 @@ def test_nickname_question_lists_current_bindings_even_when_ai_fails(store, ai_a
     if not ai_available:
         ask.side_effect = RuntimeError("AI unavailable")
     router = make_router(store, ask=ask, bindings=lambda: dict(bindings))
-    question = router.dispatch("今儿", PRIVATE_CONTEXT)
+    question = router.dispatch("撒情况", PRIVATE_CONTEXT)
     assert "小明（Dota ID：123）" in question
     assert "小红（Dota ID：456）" in question
     bindings["小明"] = 789
@@ -133,4 +141,4 @@ def test_nickname_question_lists_current_bindings_even_when_ai_fails(store, ai_a
 
 def test_empty_permanent_roster_guides_tracking(store) -> None:
     router = make_router(store, bindings=lambda: {})
-    assert "尚未记录选手，请先使用：追踪术 昵称 dotaId" in router.dispatch("今儿", PRIVATE_CONTEXT)
+    assert "尚未记录选手，请先使用：追踪术 昵称 dotaId" in router.dispatch("撒情况", PRIVATE_CONTEXT)

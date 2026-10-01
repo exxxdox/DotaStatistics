@@ -144,8 +144,8 @@ class OpenDotaApiClient:
             if isinstance(hero, dict) and "id" in hero and "name" in hero
         }
 
-    def get_recent_matches(self, account_id: int, limit: int = 3) -> str | None:
-        """格式化最近几场天梯比赛；上游异常时返回 None。"""
+    def get_recent_matches(self, account_id: int, limit: int = 5) -> str | None:
+        """默认展示最近五场天梯比赛；上游异常时返回 None。"""
         try:
             payload = self._get(f"/players/{account_id}/recentMatches")
         except OpenDotaApiError:
@@ -248,8 +248,6 @@ class OpenDotaApiClient:
         target_dates = self._target_dates()
         missing_dates = [day for day in target_dates if day.isoformat() not in days]
 
-        updates, refresh_error = self._fetch_missing_days(missing_dates)
-        days.update(updates)
         # 只保留当前窗口，避免缓存文件无限增长。
         document["days"] = {
             day.isoformat(): days[day.isoformat()]
@@ -257,8 +255,15 @@ class OpenDotaApiClient:
             if day.isoformat() in days
         }
 
+        def save_day(day: date, rows: list[dict[str, Any]]) -> None:
+            # 每日成功即原子落盘，后续请求阻塞或进程中断也不会丢失回填进度；
+            # 完整月度快照留到所有日期就绪后再替换。
+            document["days"][day.isoformat()] = rows
+            self._save_cache_document(document)
+
+        _, refresh_error = self._fetch_missing_days(missing_dates, save_day)
+
         if refresh_error is not None:
-            # 已成功的日切片也立即落盘，下次只补剩余日期。
             self._save_cache_document(document)
             snapshot = self._load_recent_snapshot(document)
             if snapshot is None:
@@ -308,7 +313,9 @@ class OpenDotaApiClient:
         ]
 
     def _fetch_missing_days(
-        self, missing_dates: list[date]
+        self,
+        missing_dates: list[date],
+        on_day: Callable[[date, list[dict[str, Any]]], None] | None = None,
     ) -> tuple[dict[str, list[dict[str, Any]]], OpenDotaApiError | None]:
         if not missing_dates:
             return {}, None
@@ -328,6 +335,9 @@ class OpenDotaApiClient:
                     # 保存前先完整校验，禁止坏数据污染增量缓存。
                     self._aggregate_monthly_stats(rows)
                     updates[day.isoformat()] = rows
+                    if on_day is not None:
+                        # 消费线程串行写缓存，多个查询 worker 不争用临时文件。
+                        on_day(day, rows)
                 except OpenDotaApiError as error:
                     first_error = first_error or error
         return updates, first_error

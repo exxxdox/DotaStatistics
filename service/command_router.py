@@ -35,7 +35,6 @@ class BotServices:
     set_dota_id: Callable[[str, int], None]
     get_dota_id: Callable[[str], int | None]
     get_recent_matches: Callable[[int], str | None]
-    get_player_wl: Callable[[int, int], tuple[int, int] | None]
     get_today_report: Callable[[], str]
     chat: Callable[[str, str, int | None], str]
     resolve_hero_name: Callable[[int], str | None]
@@ -64,7 +63,6 @@ class CommandRouter:
         self._commands: dict[str, CommandHandler] = {
             "追踪术": self._track,
             "撒情况": self._recent_matches,
-            "今儿": self._today_record,
             "简报": self._report,
         }
 
@@ -75,6 +73,11 @@ class CommandRouter:
         _log.info("收到消息，开始命令分发")
         dialogue = self._dialogue_store(context)
         pending = dialogue.get_pending(context.conversation_id, context.speaker_id) if dialogue else None
+
+        # 升级后清理已删除命令的旧追问，避免恢复状态时调用不存在的处理器。
+        if pending and pending[0] not in self._commands:
+            dialogue.set_pending(context.conversation_id, context.speaker_id, None)
+            pending = None
 
         if pending and normalized_content in {"取消", "退出"}:
             dialogue.set_pending(context.conversation_id, context.speaker_id, None)
@@ -98,7 +101,7 @@ class CommandRouter:
             if dialogue:
                 # 新命令替换旧追问，避免用户被之前的参数填写流程困住。
                 dialogue.set_pending(context.conversation_id, context.speaker_id, None)
-            if words[0] in {"追踪术", "今儿", "撒情况"}:
+            if words[0] in {"追踪术", "撒情况"}:
                 return self._parameter_command(words[0], words[1:], context)
             return handler(words[1:])
         if pending:
@@ -207,7 +210,6 @@ class CommandRouter:
             "\n指令列表:\n"
             "@我 追踪术 昵称 dotaId\n"
             "@我 撒情况 昵称\n"
-            "@我 今儿 昵称\n"
             "@我 简报\n"
             "@我 查看当前群OpenID\n"
             "@我 高胜率英雄\n"
@@ -240,18 +242,6 @@ class CommandRouter:
         _log.info("查询近期比赛")
         result = self.services.get_recent_matches(dota_id)
         return result or "暂时没有查到近期比赛。"
-
-    def _today_record(self, args: list[str]) -> str:
-        nickname, dota_id, error = self._resolve_player(args, "今儿")
-        if error is not None:
-            return error
-
-        _log.info("查询今日战绩")
-        result = self.services.get_player_wl(dota_id, 1)
-        if result is None:
-            return "暂时没有查到今日战绩。"
-        win, lose = result
-        return f"胜:{win}, 败:{lose}"
 
     def _report(self, args: list[str]) -> str:
         if args:
