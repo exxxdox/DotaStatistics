@@ -18,7 +18,7 @@ https://docs.opendota.com
 - `uv run pytest tests/test_qq_bot.py -q` runs the command-router tests only.
 - `docker compose up -d --build` is the default production deployment command.
 - `docker compose logs -f bot` follows the containerized bot logs.
-- `./startup.sh` starts the locked production environment on Linux; `sudo ./init.sh` installs and enables the systemd service.
+- `bash manage.sh start` starts the locked production environment on Linux; `sudo bash manage.sh init` installs dependencies and deploys systemd; `sudo bash manage.sh deploy` updates and restarts the service. Keep shell operations in this single entry point.
 
 Use Python 3.12. Commit `uv.lock` whenever dependency changes alter the resolved environment.
 

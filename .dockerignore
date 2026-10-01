@@ -15,7 +15,5 @@ res/*.tmp
 tests
 AGENTS.md
 CLAUDE.md
-deploy.sh
-init.sh
-startup.sh
+manage.sh
 res/dota.service
