@@ -4,16 +4,23 @@ QQ Dota 2 机器人，支持选手追踪、近期战绩、每日简报、英雄�
 
 ## Docker 启动
 
-复制环境配置，填写三个必填凭据，再创建仅机器人账户可写的数据目录：
+复制环境配置并填写三个必填凭据。Compose 会把项目内的 `data` 目录映射到容器 `/data`：
 
 ```bash
 cp .env.example .env
 ${EDITOR:-vi} .env
-sudo install -d -m 0750 -o 10001 -g 10001 data
 docker compose up -d --build
 ```
 
-Compose 不会自动创建 `data`，避免新 Linux 主机把目录建成机器人无法写入的 root 目录。
+容器入口会以 root 创建或修正 Linux 目录权限，随后立即降权到 UID/GID `10001:10001` 运行机器人。Docker Desktop 的 Windows 映射目录不支持可靠的 `chmod/chown`，入口会先验证非 root 用户可读写，再交给 Windows ACL 管理权限。
+
+Windows PowerShell 可直接运行：
+
+```powershell
+Copy-Item .env.example .env
+New-Item -ItemType Directory -Force .\data
+docker compose up -d --build
+```
 
 ## systemd 启动
 
@@ -87,7 +94,7 @@ docker load --input dotastatistics-v1.0.0-linux-amd64-docker-image.tar
 - 已绑定的选手资料长期保留，不随聊天记录淘汰。追踪名单在机器人内共用，可询问“目前记录了哪些 Dota 用户？”查看。
 - AI 只可调用固定的只读查询工具，不能在对话中新增或修改选手绑定。
 
-AI 仅在当前消息明确提到 Dota 查询或已绑定昵称时开放工具。玩家资料只能按已绑定昵称查询；单场比赛、英雄和战队查询接受对应正整数 ID。支持玩家资料、胜负、英雄池、队友、统计、段位与排名，单场摘要，英雄克制与时长，战队资料，以及职业、直播和公开比赛摘要。任意 URL、SQL、OpenDota 写操作、搜索和解析任务均不开放。
+AI 会结合当前消息和对话上下文，自主判断是否调用工具。玩家资料只能按已绑定昵称查询；单场比赛、英雄和战队查询接受对应正整数 ID。支持玩家资料、胜负、英雄池、队友、统计、段位与排名，单场摘要，英雄克制与时长，战队资料，以及职业、直播和公开比赛摘要。任意 URL、SQL、OpenDota 写操作、搜索和解析任务均不开放。
 
 `DOTA_AGENT_MAX_TOOL_CALLS` 控制单次 AI 对话最多执行多少次工具调用，默认值为 `4`，必须是正整数。Docker Compose 会通过 `.env` 将其传入容器。
 

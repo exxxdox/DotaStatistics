@@ -13,10 +13,6 @@ services:
       # 只把运行时 JSON 写入持久目录，避免覆盖镜像内的英雄名称静态资源。
       DATA_DIR: /data
     volumes:
-      # 禁止 Compose 以 root 自动创建目录；README 的初始化命令负责正确权限。
-      - type: bind
-        source: ./data
-        target: /data
-        bind:
-          create_host_path: false
+      # 入口在 Linux 修正目录所有权；Windows bind mount 使用宿主机 ACL。
+      - ./data:/data
 networks: {}

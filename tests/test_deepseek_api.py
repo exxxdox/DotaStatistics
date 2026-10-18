@@ -122,7 +122,7 @@ def test_general_chat_executes_tool_and_returns_final_answer(
     }
 
 
-def test_general_chat_only_exposes_tools_for_current_dota_intent(
+def test_general_chat_always_exposes_tools_for_model_intent_detection(
     monkeypatch, memory_store
 ) -> None:
     client = build_client()
@@ -134,32 +134,10 @@ def test_general_chat_only_exposes_tools_for_current_dota_intent(
         "你好", "c2c:user-a",
         tool_definitions=tools, execute_tool=execute_tool,
     )
-    plain_request = client.chat.completions.create.call_args.kwargs
-    assert "tools" not in plain_request
-    assert "tool_choice" not in plain_request
-
-    deepseek_api.deepseek_general(
-        "查一下Dota段位", "c2c:user-a",
-        tool_definitions=tools, execute_tool=execute_tool,
-    )
-    assert client.chat.completions.create.call_args.kwargs["tools"] == tools
+    request = client.chat.completions.create.call_args.kwargs
+    assert request["tools"] == tools
+    assert request["tool_choice"] == "auto"
     execute_tool.assert_not_called()
-
-
-def test_general_chat_enables_tools_when_current_message_mentions_bound_nickname(
-    monkeypatch, memory_store
-) -> None:
-    client = build_client()
-    monkeypatch.setattr(deepseek_api, "get_client", lambda: client)
-    tools = [{"type": "function", "function": {"name": "lookup"}}]
-
-    deepseek_api.deepseek_general(
-        "小明最近怎么样", "c2c:user-a",
-        player_bindings=lambda: {"小明": 123}, tool_definitions=tools,
-        execute_tool=Mock(),
-    )
-
-    assert client.chat.completions.create.call_args.kwargs["tools"] == tools
 
 
 @pytest.mark.parametrize("arguments", ["not-json", "[]"])

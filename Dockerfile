@@ -27,7 +27,8 @@ ENV DATA_DIR=/data \
 WORKDIR /app
 
 # 固定 UID/GID 便于持久卷保留明确的文件所有权，并避免以 root 运行机器人。
-RUN addgroup -g 10001 -S bot \
+RUN apk add --no-cache su-exec \
+    && addgroup -g 10001 -S bot \
     && adduser -u 10001 -G bot -S -D -H bot \
     && mkdir --parents /data \
     && chown bot:bot /data
@@ -38,8 +39,10 @@ COPY --chown=bot:bot main.py qq_bot.py data_center.py bootstrap.py ./
 COPY --chown=bot:bot lib ./lib
 COPY --chown=bot:bot service ./service
 COPY --chown=bot:bot res/hero_name.json ./res/hero_name.json
+COPY --chmod=0755 docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 
-USER bot
+# 入口仅用 root 修正 Linux bind mount，随后立即降权到 bot。
+ENTRYPOINT ["docker-entrypoint.sh"]
 
 # QQ WebSocket 是主动出站连接，因此镜像不声明或监听入站端口。
 CMD ["python", "main.py"]

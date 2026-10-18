@@ -12,6 +12,8 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
+from lib.file_permissions import secure_permissions
+
 
 class ConversationMemory:
     def __init__(
@@ -33,8 +35,7 @@ class ConversationMemory:
 
     @staticmethod
     def _secure_permissions(path: Path, mode: int) -> None:
-        if os.name == "posix":
-            path.chmod(mode)
+        secure_permissions(path, mode)
 
     def _location(self, conversation_id: str) -> tuple[Path, int]:
         kind, separator, identity = conversation_id.partition(":")
