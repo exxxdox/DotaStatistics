@@ -9,7 +9,11 @@ umask 077
 
 if [ "$(id -u)" -eq 0 ]; then
     # 先消解 .. 和符号链接再校验边界，避免 /data/../etc 通过字符串前缀匹配。
-    if ! data_dir="$(realpath -m "$data_dir" 2>/dev/null)"; then
+    # Alpine 的 busybox realpath 不支持 -m，改用镜像内自带的 Python；-I 隔离工作目录模块。
+    if ! data_dir="$(python -I -c '
+import os, sys
+print(os.path.realpath(sys.argv[1]))
+' "$data_dir" 2>/dev/null)"; then
         echo "error: cannot resolve DATA_DIR" >&2
         exit 1
     fi

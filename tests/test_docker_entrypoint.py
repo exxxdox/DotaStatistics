@@ -4,15 +4,14 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 
 import pytest
 
 
 @pytest.mark.skipif(
-    os.name != "posix"
-    or shutil.which("sh") is None
-    or shutil.which("realpath") is None,
-    reason="requires POSIX sh and realpath",
+    os.name != "posix" or shutil.which("sh") is None,
+    reason="requires POSIX sh",
 )
 def test_data_dir_traversal_is_rejected(tmp_path: Path) -> None:
     source = Path(__file__).resolve().parents[1] / "docker-entrypoint.sh"
@@ -27,6 +26,13 @@ def test_data_dir_traversal_is_rejected(tmp_path: Path) -> None:
     fake_id = bin_dir / "id"
     fake_id.write_text("#!/bin/sh\nprintf '0'\n", encoding="utf-8")
     fake_id.chmod(0o755)
+    # 入口脚本使用镜像内的 python 做 realpath；测试转发到当前解释器。
+    fake_python = bin_dir / "python"
+    fake_python.write_text(
+        f'#!/bin/sh\nexec "{sys.executable}" "$@"\n',
+        encoding="utf-8",
+    )
+    fake_python.chmod(0o755)
     env = {
         **os.environ,
         "PATH": f"{bin_dir}:/usr/bin:/bin",
