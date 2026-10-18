@@ -99,7 +99,15 @@ def build_router(**overrides) -> CommandRouter:
         "list_player_nicknames": lambda: [],
     }
     defaults.update(overrides)
-    return CommandRouter(BotServices(**defaults), memory_store=qq_bot.test_memory_store)
+    return CommandRouter(
+        BotServices(**defaults),
+        memory_store=qq_bot.test_memory_store,
+        # 测试统一把 user-a 设为已配置操作者，写操作才允许执行。
+        operator_ids=frozenset({"user-a"}),
+    )
+
+
+OPERATOR_CONTEXT = CommandContext(conversation_id="c2c:user-a", speaker_id="user-a")
 
 
 def test_same_conversation_messages_are_processed_in_order(memory_store) -> None:
@@ -156,9 +164,20 @@ def test_track_validates_and_saves_dota_id() -> None:
     saved: list[tuple[str, int]] = []
     router = build_router(set_dota_id=lambda nickname, dota_id: saved.append((nickname, dota_id)))
 
-    assert "可以看看" in router.dispatch("追踪术 小明 123")
+    assert "可以看看" in router.dispatch("追踪术 小明 123", OPERATOR_CONTEXT)
     assert saved == [("小明", 123)]
-    assert "dotaId 必须是正整数" in router.dispatch("追踪术 小明 abc")
+    assert "dotaId 必须是正整数" in router.dispatch(
+        "追踪术 小明 abc", OPERATOR_CONTEXT
+    )
+
+
+def test_group_member_cannot_override_global_binding() -> None:
+    saved: list[tuple[str, int]] = []
+    router = build_router(set_dota_id=lambda nickname, dota_id: saved.append((nickname, dota_id)))
+    member = CommandContext(conversation_id="group:room", speaker_id="bob")
+
+    assert "管理员" in router.dispatch("追踪术 小明 999", member)
+    assert saved == []
 
 
 def test_known_commands_are_dispatched() -> None:
@@ -183,7 +202,7 @@ def test_command_panel_slash_prefix_is_ignored() -> None:
 def test_command_errors_ask_for_parameters_without_general_chat() -> None:
     router = build_router()
 
-    assert "请直接回复昵称" in router.dispatch("追踪术")
+    assert "请直接回复昵称" in router.dispatch("追踪术", OPERATOR_CONTEXT)
     assert "请直接回复昵称" in router.dispatch("撒情况")
     assert "请直接回复昵称" in router.dispatch("撒情况")
     assert router.dispatch("撒情况 陌生人") == "还没有追踪选手「陌生人」。"
@@ -192,7 +211,7 @@ def test_command_errors_ask_for_parameters_without_general_chat() -> None:
 def test_legacy_menu_placeholders_are_treated_as_missing_arguments() -> None:
     router = build_router()
 
-    assert "请直接回复昵称" in router.dispatch("追踪术 昵称 dotaId")
+    assert "请直接回复昵称" in router.dispatch("追踪术 昵称 dotaId", OPERATOR_CONTEXT)
     assert "请直接回复昵称" in router.dispatch("撒情况 昵称")
     assert "请直接回复昵称" in router.dispatch("撒情况 昵称")
 

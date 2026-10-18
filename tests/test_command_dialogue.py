@@ -6,7 +6,10 @@ from lib.conversation_memory import ConversationMemory
 from service.command_router import BotServices, CommandContext, CommandRouter
 
 
-def make_router(store, *, ask=None, saved=None, ai_enabled=True, bindings=None) -> CommandRouter:
+def make_router(
+    store, *, ask=None, saved=None, ai_enabled=True, bindings=None,
+    operator_ids=frozenset({"alice"}),
+) -> CommandRouter:
     services = BotServices(
         set_dota_id=lambda nickname, dota_id: saved.append((nickname, dota_id)),
         get_dota_id={"小明": 123, "小红": 456}.get,
@@ -17,7 +20,12 @@ def make_router(store, *, ask=None, saved=None, ai_enabled=True, bindings=None) 
         ask_command_parameter=ask,
         list_player_bindings=bindings,
     )
-    return CommandRouter(services, memory_store=store, ai_enabled=ai_enabled)
+    return CommandRouter(
+        services,
+        memory_store=store,
+        ai_enabled=ai_enabled,
+        operator_ids=operator_ids,
+    )
 
 
 @pytest.fixture
@@ -136,6 +144,37 @@ def test_nickname_question_lists_current_bindings_even_when_ai_fails(store, ai_a
     question = router.dispatch("撒情况", PRIVATE_CONTEXT)
     assert "小明（Dota ID：789）" in question
     assert "Dota ID：123" not in question
+
+
+def test_group_member_cannot_write_global_binding(store) -> None:
+    saved = []
+    router = make_router(store, saved=saved)
+    bob = CommandContext(conversation_id="group:room", speaker_id="bob")
+
+    assert "管理员" in router.dispatch("追踪术 小明 999", bob)
+    assert saved == []
+    assert store.get_pending("group:room", "bob") is None
+
+
+def test_track_is_open_when_no_operator_is_configured(store) -> None:
+    saved = []
+    router = make_router(store, saved=saved, operator_ids=frozenset())
+
+    # 未配置名单时保持旧行为：所有人仍可使用追踪术。
+    assert "可以看看" in router.dispatch("追踪术 小明 999", PRIVATE_CONTEXT)
+    assert saved == [("小明", 999)]
+
+
+def test_legacy_track_pending_cannot_bypass_operator_check(store) -> None:
+    saved = []
+    router = make_router(store, saved=saved)
+    bob = CommandContext(conversation_id="group:room", speaker_id="bob")
+    # 旧版本遗留的追问状态也不能让非操作者完成写入。
+    store.set_pending("group:room", "bob", ("追踪术", ["小明"]))
+
+    assert "管理员" in router.dispatch("999", bob)
+    assert saved == []
+    assert store.get_pending("group:room", "bob") is None
 
 
 def test_empty_permanent_roster_guides_tracking(store) -> None:

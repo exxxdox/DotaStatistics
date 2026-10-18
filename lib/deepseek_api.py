@@ -16,8 +16,14 @@ FLASH_MODEL = "deepseek-v4-flash"
 DEEPSEEK_TIMEOUT_SECONDS = 30.0
 DEEPSEEK_MAX_RETRIES = 1
 DEFAULT_MAX_TOOL_CALLS = 4
+# 环境变量只能在上限内下调，错误配置不能无限放大费用和延迟。
+MAX_TOOL_CALLS_CAP = 8
 MAX_TOOL_ROUNDS = 3
 MAX_TOOL_ARGUMENT_CHARS = 2_048
+# 分析、普通聊天和工具收尾使用不同的固定输出上限。
+ANALYSIS_MAX_OUTPUT_TOKENS = 1_200
+CHAT_MAX_OUTPUT_TOKENS = 400
+TOOL_FINAL_MAX_OUTPUT_TOKENS = 200
 
 
 @lru_cache(maxsize=1)
@@ -46,7 +52,7 @@ def _max_tool_calls() -> int:
         raise RuntimeError("DOTA_AGENT_MAX_TOOL_CALLS 必须是正整数") from error
     if value <= 0:
         raise RuntimeError("DOTA_AGENT_MAX_TOOL_CALLS 必须是正整数")
-    return value
+    return min(value, MAX_TOOL_CALLS_CAP)
 
 
 def _complete(
@@ -101,6 +107,14 @@ def _complete(
                 if tool_rounds < MAX_TOOL_ROUNDS and tool_call_count < max_tool_calls
                 else "none"
             )
+
+        if thinking:
+            max_output_tokens = ANALYSIS_MAX_OUTPUT_TOKENS
+        elif tool_definitions and request.get("tool_choice") == "none":
+            max_output_tokens = TOOL_FINAL_MAX_OUTPUT_TOKENS
+        else:
+            max_output_tokens = CHAT_MAX_OUTPUT_TOKENS
+        request["max_tokens"] = max_output_tokens
 
         response = get_client().chat.completions.create(**request)
         message = response.choices[0].message

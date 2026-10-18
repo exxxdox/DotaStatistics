@@ -39,4 +39,4 @@ Existing history uses short messages such as `update`; new commits should be cle
 
 ## Security & Configuration
 
-Never commit `.env`, API keys, or generated player data. Configure `QQBOT_APP_ID`, `QQBOT_APP_SECRET`, and `DEEPSEEK_API_KEY` locally; systemd reads production secrets from `/etc/dota/secrets`, owned by `root:dota` with mode `0640`.
+Never commit `.env`, API keys, or generated player data. Configure `QQBOT_APP_ID`, `QQBOT_APP_SECRET`, and `DEEPSEEK_API_KEY` locally; systemd reads production secrets from `/etc/dota/secrets`, owned by `root:dota` with mode `0640`. Set `DOTA_OPERATOR_IDS` (comma-separated QQ OpenIDs) to restrict the `追踪术` write command; an empty value allows everyone.

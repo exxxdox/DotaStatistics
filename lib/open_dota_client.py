@@ -25,6 +25,9 @@ STAT_PERIOD_DAYS = 30
 CACHE_SCHEMA_VERSION = 2
 AGENT_QUERY_TIMEOUT_SECONDS = 10.0
 MAX_EXTERNAL_TEXT_CHARS = 160
+# 查询结果最终只保留有限字段；解析前仍要限制原文大小，防止异常上游耗尽内存。
+MAX_RESPONSE_BYTES = 8 * 1024 * 1024
+RESPONSE_CHUNK_BYTES = 64 * 1024
 
 PLAYER_VIEW_FIELDS = {
     "win_loss": ("win", "lose"),
@@ -359,13 +362,23 @@ class OpenDotaApiClient:
     def get_recent_matches(self, account_id: int, limit: int = 5) -> str | None:
         """默认展示最近五场天梯比赛；上游异常时返回 None。"""
         try:
-            payload = self._get(f"/players/{account_id}/recentMatches")
+            # Agent 查询槽只有四个，慢请求不能继承普通查询的 30 秒超时和重试。
+            payload = self._get(
+                f"/players/{account_id}/recentMatches",
+                timeout=AGENT_QUERY_TIMEOUT_SECONDS,
+                max_retries=0,
+            )
         except OpenDotaApiError:
             _log.warning("查询近期比赛失败: account_id=%s", account_id)
+            return None
+        if not isinstance(payload, list):
+            _log.warning("近期比赛响应格式错误: account_id=%s", account_id)
             return None
         result = "\n"
         size = 0
         for game in payload:
+            if not isinstance(game, dict):
+                continue
             if game.get("lobby_type") != 7:
                 continue
             radiant_win = game.get("radiant_win")
@@ -392,39 +405,25 @@ class OpenDotaApiClient:
                 break
         return result
 
-    def get_match_detail(self, match_id: int, account_id: int) -> str:
-        """格式化单场比赛的指定玩家数据，供日报逐场拼接。"""
-        payload = self._get(f"/matches/{match_id}")
-        result = f" 持续时间{payload.get('duration')}秒 "
-        for player in payload.get("players"):
-            if player.get("account_id") == account_id:
-                is_radiant = player.get("isRadiant")
-                gold_per_min = player.get("gold_per_min")
-                xp_per_min = player.get("xp_per_min")
-                hero_damage = player.get("hero_damage")
-                tower_damage = player.get("tower_damage")
-                hero_healing = player.get("hero_healing")
-                total_gold = player.get("total_gold")
-                total_xp = player.get("total_xp")
-                result += (
-                    f" {'天辉' if is_radiant else '夜魇'} "
-                    f"gpm {gold_per_min} xpm {xp_per_min} "
-                    f"对英雄伤害{hero_damage} 对英雄治疗{hero_healing} "
-                    f"建筑伤害{tower_damage} 总金钱{total_gold} 总经验 {total_xp} "
-                )
-        return result
-
     def get_matches_by_date(self, account_id: int, date: int) -> str | None:
         """格式化指定日期的天梯比赛列表；上游异常时返回 None。"""
         try:
             payload = self._get(
-                f"/players/{account_id}/matches", params={"date": date}
+                f"/players/{account_id}/matches",
+                params={"date": date},
+                timeout=AGENT_QUERY_TIMEOUT_SECONDS,
+                max_retries=0,
             )
         except OpenDotaApiError:
             _log.warning("查询玩家比赛失败: account_id=%s", account_id)
             return None
+        if not isinstance(payload, list):
+            _log.warning("玩家比赛响应格式错误: account_id=%s", account_id)
+            return None
         result = ""
         for game in payload:
+            if not isinstance(game, dict):
+                continue
             if game.get("lobby_type") != 7:
                 continue
             radiant_win = game.get("radiant_win")
@@ -755,6 +754,22 @@ GROUP BY hero_id
             )
         return result
 
+    @staticmethod
+    def _read_response_json(response: Any) -> Any:
+        """流式读取并限制响应体大小，投影前不让异常上游撑大内存。"""
+        body = bytearray()
+        for chunk in response.iter_content(RESPONSE_CHUNK_BYTES):
+            if not chunk:
+                continue
+            body.extend(chunk)
+            if len(body) > MAX_RESPONSE_BYTES:
+                raise OpenDotaApiError("OpenDota 响应体过大")
+        try:
+            # json.loads 接受字节串，并会自动识别 UTF-8。
+            return json.loads(bytes(body))
+        except ValueError as error:
+            raise OpenDotaApiError(f"OpenDota 响应不是有效 JSON: {error}") from error
+
     def _get(
         self,
         path: str,
@@ -766,12 +781,17 @@ GROUP BY hero_id
         request_timeout = self.timeout if timeout is None else timeout
         retry_count = self.max_retries if max_retries is None else max_retries
         for attempt in range(retry_count + 1):
+            response = None
             try:
                 response = self.session.get(
-                    f"{self.BASE_URL}{path}", params=params, timeout=request_timeout
+                    f"{self.BASE_URL}{path}",
+                    params=params,
+                    timeout=request_timeout,
+                    # 流式读取，字节上限必须早于完整 JSON 解析生效。
+                    stream=True,
                 )
                 response.raise_for_status()
-                return response.json()
+                return self._read_response_json(response)
             except requests.RequestException as error:
                 status_code = getattr(error.response, "status_code", None)
                 retryable = (
@@ -793,19 +813,22 @@ GROUP BY hero_id
                 raise OpenDotaApiError(message) from error
             except ValueError as error:
                 raise OpenDotaApiError(f"OpenDota 响应不是有效 JSON: {error}") from error
+            finally:
+                if response is not None:
+                    response.close()
 
         raise AssertionError("OpenDota 重试循环异常退出")
 
     @staticmethod
     def _response_error_detail(response: Any) -> str:
         try:
-            payload = response.json()
+            payload = OpenDotaApiClient._read_response_json(response)
             detail = payload.get("error") or payload.get("err")
             if not isinstance(detail, str):
                 return ""
             # 上游正文不可信，只保留单行短文本用于诊断。
             return " ".join(detail.split())[:200]
-        except (AttributeError, TypeError, ValueError):
+        except (AttributeError, TypeError, OpenDotaApiError, requests.RequestException):
             return ""
 
     def _save_cache_document(self, document: dict[str, Any]) -> None:

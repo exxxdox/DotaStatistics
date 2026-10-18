@@ -1,16 +1,22 @@
 #!/bin/sh
 set -eu
 
-data_dir="${DATA_DIR:-/data}"
+data_root="/data"
+data_dir="${DATA_DIR:-$data_root}"
 
 # 新文件默认只允许 bot 访问，避免持久化数据被同容器其他用户读取。
 umask 077
 
 if [ "$(id -u)" -eq 0 ]; then
+    # 先消解 .. 和符号链接再校验边界，避免 /data/../etc 通过字符串前缀匹配。
+    if ! data_dir="$(realpath -m "$data_dir" 2>/dev/null)"; then
+        echo "error: cannot resolve DATA_DIR" >&2
+        exit 1
+    fi
     case "$data_dir" in
-        /data|/data/*) ;;
+        "$data_root"|"$data_root"/*) ;;
         *)
-            echo "error: DATA_DIR must stay within /data" >&2
+            echo "error: DATA_DIR must stay within $data_root" >&2
             exit 1
             ;;
     esac

@@ -94,6 +94,49 @@ def test_context_budget_and_before_id(tmp_path):
     assert store.read("c2c:alice", max_messages=1) == [{"role": "assistant", "content": "abcdefghij"}]
 
 
+def test_total_budget_evicts_oldest_conversation(tmp_path):
+    store = ConversationMemory(
+        tmp_path,
+        user_limit_bytes=32768,
+        group_limit_bytes=32768,
+        total_limit_bytes=1_000_000,
+    )
+    store.append("c2c:alice", "user", noise(6000, 1))
+    store.append("c2c:bob", "user", noise(6000, 2))
+    alice = tmp_path / f"{hashlib.sha256(b'c2c:alice').hexdigest()}.sqlite3"
+    bob = tmp_path / f"{hashlib.sha256(b'c2c:bob').hexdigest()}.sqlite3"
+    # 显式设置活动时间，确保淘汰顺序与“最久未活动”一致。
+    os.utime(alice, (1_600_000_000, 1_600_000_000))
+    os.utime(bob, (1_600_000_010, 1_600_000_010))
+    # 预算恰好等于两个会话，新增第三个会话必须触发最旧文件淘汰。
+    limit = alice.stat().st_size + bob.stat().st_size
+    bounded = ConversationMemory(
+        tmp_path,
+        user_limit_bytes=32768,
+        group_limit_bytes=32768,
+        total_limit_bytes=limit,
+    )
+
+    bounded.append("c2c:carol", "user", noise(6000, 3))
+
+    assert not alice.exists()
+    assert bob.exists()
+    assert sum(path.stat().st_size for path in tmp_path.glob("*.sqlite3")) <= limit
+
+
+def test_lowering_limit_shrinks_existing_database(tmp_path):
+    store = ConversationMemory(tmp_path, user_limit_bytes=32768)
+    for index in range(8):
+        store.append("c2c:alice", "user", noise(3000, index))
+    path = next(tmp_path.glob("*.sqlite3"))
+    before = path.stat().st_size
+    assert before > 16384
+
+    shrunk = ConversationMemory(tmp_path, user_limit_bytes=16384)
+    assert shrunk.read("c2c:alice") == []
+    assert path.stat().st_size <= 16384
+
+
 def test_corrupt_record_reports_error(tmp_path):
     store = ConversationMemory(tmp_path)
     store.append("group:room", "user", "hello")

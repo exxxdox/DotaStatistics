@@ -12,11 +12,13 @@ class Command:
     group_alias: str | None = None
     private_label: str | None = None
     private_in_help: bool = False
+    # 写操作必须由路由层校验服务端配置，不能只依赖 QQ 面板的管理员标记。
+    admin_only: bool = False
 
 
 TRACK_COMMAND = Command(
     "追踪术", "追踪术 昵称 dotaId", "绑定昵称和Dota ID",
-    handler="_track", private_label="追踪术", private_in_help=True,
+    handler="_track", private_label="追踪术", private_in_help=True, admin_only=True,
 )
 RECENT_COMMAND = Command(
     "撒情况", "撒情况 昵称", "查询选手最近5场天梯比赛",

@@ -15,6 +15,14 @@ def test_data_dir_defaults_to_project_data_directory(monkeypatch) -> None:
     )
 
 
+def test_operator_ids_require_explicit_configuration(monkeypatch) -> None:
+    monkeypatch.delenv("DOTA_OPERATOR_IDS", raising=False)
+    assert data_center._resolve_operator_ids() == frozenset()
+
+    monkeypatch.setenv("DOTA_OPERATOR_IDS", " op-a, ,op-b ")
+    assert data_center._resolve_operator_ids() == frozenset({"op-a", "op-b"})
+
+
 def test_data_dir_accepts_container_volume_path(monkeypatch, tmp_path: Path) -> None:
     configured_dir = tmp_path / "persistent-data"
     monkeypatch.setenv("DATA_DIR", str(configured_dir))

@@ -38,6 +38,26 @@ def test_set_updates_existing_player_in_memory_and_on_disk(tmp_path) -> None:
     ]
 
 
+def test_failed_save_keeps_memory_and_disk_on_old_value(tmp_path, monkeypatch) -> None:
+    path = tmp_path / "name_id.json"
+    repository = PlayerRepository(path)
+    repository.set("小明", 123)
+
+    def fail(_records) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(repository, "_save", fail)
+
+    with pytest.raises(OSError, match="disk full"):
+        repository.set("小明", 999)
+
+    # 保存失败后不能出现“内存新值、磁盘旧值”的分叉。
+    assert repository.get("小明") == 123
+    assert json.loads(path.read_text(encoding="utf-8")) == [
+        {"nick_name": "小明", "dota_id": 123}
+    ]
+
+
 def test_get_returns_none_for_unknown_nickname(tmp_path) -> None:
     repository = PlayerRepository(tmp_path / "name_id.json")
 

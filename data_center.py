@@ -20,10 +20,20 @@ def _resolve_data_dir() -> Path:
     return project_dir / "data"
 
 
+def _resolve_operator_ids() -> frozenset[str]:
+    """解析允许执行写操作的 QQ 操作者；空集合表示不限制。"""
+    return frozenset(
+        item.strip()
+        for item in os.environ.get("DOTA_OPERATOR_IDS", "").split(",")
+        if item.strip()
+    )
+
+
 data_dir = _resolve_data_dir()
 hero_names_path = resource_dir / "hero_name.json"
 common_id_path = data_dir / "name_id.json"
 hero_stats_cache_path = data_dir / "daily_hero_stats_cache.json"
 # 与运行数据共用持久卷，避免容器重建后丢失长期对话。
 conversation_memory_dir = data_dir / "conversations"
+operator_ids = _resolve_operator_ids()
 enable_ai = True

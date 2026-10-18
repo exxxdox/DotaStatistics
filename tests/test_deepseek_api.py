@@ -60,6 +60,7 @@ def test_dota_analysis_uses_flash_thinking_mode(monkeypatch) -> None:
     assert arguments["model"] == "deepseek-v4-flash"
     assert arguments["reasoning_effort"] == "high"
     assert arguments["extra_body"] == {"thinking": {"type": "enabled"}}
+    assert arguments["max_tokens"] == deepseek_api.ANALYSIS_MAX_OUTPUT_TOKENS
     client.with_options.assert_not_called()
 
 
@@ -81,6 +82,7 @@ def test_general_chat_uses_flash_without_thinking(monkeypatch, memory_store) -> 
     assert arguments["model"] == "deepseek-v4-flash"
     assert "reasoning_effort" not in arguments
     assert arguments["extra_body"] == {"thinking": {"type": "disabled"}}
+    assert arguments["max_tokens"] == deepseek_api.CHAT_MAX_OUTPUT_TOKENS
     client.with_options.assert_not_called()
 
 
@@ -211,6 +213,13 @@ def test_general_chat_limits_tool_execution_from_environment(
     assert len(assistant_calls) == expected_limit
 
 
+def test_tool_call_limit_is_hard_capped(monkeypatch) -> None:
+    monkeypatch.setenv("DOTA_AGENT_MAX_TOOL_CALLS", "1000")
+
+    # 环境变量只能下调，不能通过错误配置关闭硬上限。
+    assert deepseek_api._max_tool_calls() == deepseek_api.MAX_TOOL_CALLS_CAP
+
+
 @pytest.mark.parametrize("value", ["0", "-1", "invalid"])
 def test_tool_call_limit_rejects_invalid_environment(monkeypatch, value: str) -> None:
     monkeypatch.setenv("DOTA_AGENT_MAX_TOOL_CALLS", value)
@@ -267,6 +276,10 @@ def test_general_chat_stops_if_model_ignores_final_tool_choice(
     assert client.chat.completions.create.call_count == 4
     assert execute_tool.call_count == 3
     assert client.chat.completions.create.call_args.kwargs["tool_choice"] == "none"
+    assert (
+        client.chat.completions.create.call_args.kwargs["max_tokens"]
+        == deepseek_api.TOOL_FINAL_MAX_OUTPUT_TOKENS
+    )
 
 
 def test_general_chat_memory_is_isolated_by_conversation(monkeypatch, memory_store) -> None:

@@ -8,6 +8,7 @@ from typing import Any
 import pytest
 import requests
 
+import lib.open_dota_client as open_dota_client
 from lib.open_dota_client import (
     OpenDotaApiClient,
     OpenDotaApiError,
@@ -26,6 +27,15 @@ class FakeResponse:
                 f"{self.status_code} Server Error",
                 response=self,
             )
+
+    def iter_content(self, chunk_size: int = 1):
+        # 模拟 requests 的真实流式读取，供响应体字节上限生效。
+        body = json.dumps(self.payload).encode("utf-8")
+        for offset in range(0, len(body), chunk_size):
+            yield body[offset:offset + chunk_size]
+
+    def close(self) -> None:
+        pass
 
     def json(self) -> Any:
         return self.payload
@@ -103,9 +113,10 @@ def test_daily_query_splits_and_merges_on_query_timeout(
     assert rows == [{"hero_id": 1, "games": 20, "wins": 12}]
 
 
-def test_monthly_stats_backfill_once_then_reuse_daily_cache() -> None:
+def test_monthly_stats_backfill_once_then_reuse_daily_cache(tmp_path: Path) -> None:
     fixed_now = datetime(2026, 8, 27, 12, tzinfo=timezone.utc)
-    cache_path = Path(__file__).parent / ".daily_hero_stats_cache_test.json"
+    # 每个测试使用独立缓存文件，避免并行进程争用同一临时路径。
+    cache_path = tmp_path / "hero_stats.json"
     calls: list[date] = []
 
     def fetch(day: date) -> list[dict[str, Any]]:
@@ -150,9 +161,9 @@ def test_monthly_stats_backfill_once_then_reuse_daily_cache() -> None:
         cache_path.with_suffix(".json.tmp").unlink(missing_ok=True)
 
 
-def test_refresh_failure_uses_recent_complete_snapshot() -> None:
+def test_refresh_failure_uses_recent_complete_snapshot(tmp_path: Path) -> None:
     first_now = datetime(2026, 8, 27, 12, tzinfo=timezone.utc)
-    cache_path = Path(__file__).parent / ".daily_snapshot_cache_test.json"
+    cache_path = tmp_path / "hero_stats_snapshot.json"
     try:
         client = OpenDotaApiClient(
             cache_path=cache_path,
@@ -599,6 +610,7 @@ def test_agent_player_profile_uses_fixed_endpoint_and_removes_private_links() ->
     assert session.requests == [((f"{client.BASE_URL}/players/123",), {
         "params": None,
         "timeout": 10.0,
+        "stream": True,
     })]
 
 
@@ -626,7 +638,7 @@ def test_agent_player_views_use_exact_paths_params_and_projection(
     assert client.get_player_data(123, view, days=30, limit=2) == expected
     assert session.requests[0] == ((
         f"{client.BASE_URL}/players/123/{endpoint}",
-    ), {"params": params, "timeout": 10.0})
+    ), {"params": params, "timeout": 10.0, "stream": True})
 
 
 def test_agent_player_counts_bounds_categories_and_entries() -> None:
@@ -682,6 +694,7 @@ def test_agent_match_query_projects_core_fields_and_ten_players() -> None:
     assert session.requests[0] == ((f"{client.BASE_URL}/matches/99",), {
         "params": None,
         "timeout": 10.0,
+        "stream": True,
     })
 
 
@@ -708,6 +721,7 @@ def test_agent_hero_views_use_fixed_endpoints(
     assert session.requests[0] == ((f"{client.BASE_URL}{path}",), {
         "params": params,
         "timeout": 10.0,
+        "stream": True,
     })
 
 
@@ -730,6 +744,7 @@ def test_agent_team_views_use_fixed_endpoints(
     assert session.requests[0] == ((f"{client.BASE_URL}{path}",), {
         "params": None,
         "timeout": 10.0,
+        "stream": True,
     })
 
 
@@ -754,6 +769,7 @@ def test_agent_global_views_use_fixed_endpoints_and_limit_rows(
     assert session.requests[0] == ((f"{client.BASE_URL}{path}",), {
         "params": None,
         "timeout": 10.0,
+        "stream": True,
     })
 
 
@@ -794,3 +810,61 @@ def test_agent_query_disables_retry_even_when_client_would_retry() -> None:
         client.get_global_data("live_matches", limit=1)
 
     assert session.calls == 1
+
+
+def test_legacy_match_queries_use_agent_timeout_and_no_retry() -> None:
+    session = FakeSession([FakeResponse(200, []), FakeResponse(200, [])])
+    client = OpenDotaApiClient(session=session, max_retries=2, cache_path=None)
+
+    assert client.get_recent_matches(123) == "\n"
+    assert client.get_matches_by_date(123, 1) == ""
+
+    assert session.calls == 2
+    for _args, kwargs in session.requests:
+        assert kwargs["timeout"] == 10.0
+        assert kwargs["stream"] is True
+
+
+@pytest.mark.parametrize("payload", [None, {"match_id": 1}, "unexpected"])
+def test_legacy_match_queries_reject_non_list_payloads(payload: Any) -> None:
+    recent = OpenDotaApiClient(
+        session=FakeSession([FakeResponse(200, payload)]),
+        max_retries=0,
+        cache_path=None,
+    )
+    by_date = OpenDotaApiClient(
+        session=FakeSession([FakeResponse(200, payload)]),
+        max_retries=0,
+        cache_path=None,
+    )
+
+    assert recent.get_recent_matches(123) is None
+    assert by_date.get_matches_by_date(123, 1) is None
+
+
+def test_legacy_match_queries_skip_non_mapping_rows() -> None:
+    recent = OpenDotaApiClient(
+        session=FakeSession([FakeResponse(200, [None, "x", {"lobby_type": 0}])]),
+        max_retries=0,
+        cache_path=None,
+    )
+    by_date = OpenDotaApiClient(
+        session=FakeSession([FakeResponse(200, [None, "x", {"lobby_type": 0}])]),
+        max_retries=0,
+        cache_path=None,
+    )
+
+    assert recent.get_recent_matches(123) == "\n"
+    assert by_date.get_matches_by_date(123, 1) == ""
+
+
+def test_get_rejects_oversized_response_body(monkeypatch) -> None:
+    monkeypatch.setattr(open_dota_client, "MAX_RESPONSE_BYTES", 16)
+    client = OpenDotaApiClient(
+        session=FakeSession([FakeResponse(200, {"padding": "x" * 100})]),
+        max_retries=0,
+        cache_path=None,
+    )
+
+    with pytest.raises(OpenDotaApiError, match="响应体过大"):
+        client._get("/heroStats")

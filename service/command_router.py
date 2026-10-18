@@ -4,6 +4,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from data_center import _log, enable_ai
+from data_center import operator_ids as configured_operator_ids
 from lib.conversation_memory import ConversationMemory
 from service.commands import CLEAR_COMMAND, COMMANDS, GROUP_OPENID_COMMAND, TRACK_COMMAND
 
@@ -51,10 +52,15 @@ class CommandRouter:
         services: BotServices,
         ai_enabled: bool = enable_ai,
         memory_store: ConversationMemory | None = None,
+        operator_ids: frozenset[str] | None = None,
     ) -> None:
         self.services = services
         self.ai_enabled = ai_enabled
         self.memory_store = memory_store
+        # 未显式传入时读取部署配置；集合为空表示不限制写操作。
+        self.operator_ids = (
+            configured_operator_ids if operator_ids is None else frozenset(operator_ids)
+        )
         self._commands: dict[str, CommandHandler] = {
             command.name: getattr(self, command.handler)
             for command in COMMANDS if command.handler is not None
@@ -103,6 +109,9 @@ class CommandRouter:
             if dialogue:
                 # 新命令替换旧追问，避免用户被之前的参数填写流程困住。
                 dialogue.set_pending(context.conversation_id, context.speaker_id, None)
+            denial = self._write_permission_error(words[0], context)
+            if denial:
+                return denial
             if any(command.name == words[0] and " " in command.usage for command in COMMANDS):
                 return self._parameter_command(words[0], words[1:], context)
             return handler(words[1:])
@@ -127,6 +136,19 @@ class CommandRouter:
             context.history_before_id if context is not None else None,
         )
 
+    def _write_permission_error(
+        self, command: str, context: CommandContext | None
+    ) -> str | None:
+        """配置了操作者名单时只允许名单内；名单为空表示不限制。"""
+        spec = next((item for item in COMMANDS if item.name == command), None)
+        if spec is None or not spec.admin_only:
+            return None
+        if not self.operator_ids:
+            return None
+        if context is not None and context.speaker_id in self.operator_ids:
+            return None
+        return "该指令仅限机器人管理员使用。"
+
     def _dialogue_store(self, context: CommandContext | None) -> ConversationMemory | None:
         if context is None or not context.conversation_id or not context.speaker_id:
             return None
@@ -136,6 +158,13 @@ class CommandRouter:
     def _parameter_command(
         self, command: str, args: list[str], context: CommandContext | None
     ) -> str:
+        # 追问阶段就拒绝，避免非操作者被继续引导填写一条最终无法执行的命令。
+        denial = self._write_permission_error(command, context)
+        if denial:
+            dialogue = self._dialogue_store(context)
+            if dialogue:
+                dialogue.set_pending(context.conversation_id, context.speaker_id, None)
+            return denial
         expected_count = len(next(item.usage.split() for item in COMMANDS if item.name == command)) - 1
         if args in (["昵称"], ["昵称", "dotaId"]):
             args = []

@@ -19,6 +19,19 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.12.19"
+          enable-cache: true
+
+      - name: Run tests before packaging
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Docker 构建不会导入业务模块；发布前必须运行真实测试。
+          uv run --frozen pytest
+
       - name: Build and package Docker image
         id: package
         shell: bash

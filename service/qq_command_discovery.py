@@ -36,7 +36,8 @@ def build_group_panel() -> dict[str, Any]:
                 "type": "command",
                 "name": command.group_alias or command.name,
                 "desc": command.description,
-                "only_admin": False,
+                # 面板标记只影响 QQ 展示，真正的写权限仍由 CommandRouter 校验。
+                "only_admin": command.admin_only,
             }
             for command in COMMANDS
         ],
@@ -56,22 +57,31 @@ class QQCommandDiscoveryService:
         await self._upsert_group_panel()
 
     async def _upsert_group_panel(self) -> None:
-        response = await self._request(
-            Route("GET", "/v2/panels"), params={"scope": "group", "limit": 50}
-        )
-        records = self._extract_panel_records(response)
+        # 目标面板可能在后续分页；必须沿 next_cursor 找到 is_end 或命中目标。
+        existing = None
+        cursor = ""
+        while True:
+            params = {"scope": "group", "limit": 50}
+            if cursor:
+                params["cursor"] = cursor
+            response = await self._request(Route("GET", "/v2/panels"), params=params)
+            records, next_cursor, is_end = self._extract_panel_page(response)
+            existing = next(
+                (
+                    record
+                    for record in records
+                    if isinstance(record, dict)
+                    and isinstance(record.get("panel"), dict)
+                    and record["panel"].get("remark") == GROUP_PANEL_REMARK
+                ),
+                None,
+            )
+            # 游标不前进时立即停止，避免异常响应造成无限翻页。
+            if existing is not None or is_end or not next_cursor or next_cursor == cursor:
+                break
+            cursor = next_cursor
 
         panel = build_group_panel()
-        existing = next(
-            (
-                record
-                for record in records
-                if isinstance(record, dict)
-                and isinstance(record.get("panel"), dict)
-                and record["panel"].get("remark") == GROUP_PANEL_REMARK
-            ),
-            None,
-        )
         if existing is not None and existing.get("panel_id"):
             await self._request(
                 Route("PUT", f"/v2/panels/{existing['panel_id']}"),
@@ -85,7 +95,9 @@ class QQCommandDiscoveryService:
         )
 
     @staticmethod
-    def _extract_panel_records(response: Any) -> list[dict[str, Any]]:
+    def _extract_panel_page(
+        response: Any,
+    ) -> tuple[list[dict[str, Any]], str, bool]:
         """兼容 qq-botpy 原始 JSON、data 包装和空列表字段省略。"""
         if isinstance(response, str):
             try:
@@ -115,11 +127,16 @@ class QQCommandDiscoveryService:
             not payload or "is_end" in payload or "next_cursor" in payload
         ):
             # 实际接口在首次查询且没有面板时可能省略空 records 字段。
-            return []
+            records = []
         if not isinstance(records, list):
             keys = ",".join(sorted(str(key) for key in payload))
             raise RuntimeError(
                 "QQ 指令面板列表响应格式错误: "
                 f"records={type(records).__name__}, keys={keys}"
             )
-        return records
+        cursor = payload.get("next_cursor")
+        return (
+            records,
+            cursor if isinstance(cursor, str) else "",
+            payload.get("is_end") is True,
+        )

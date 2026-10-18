@@ -132,6 +132,45 @@ def test_configure_accepts_json_string_returned_by_qq_botpy() -> None:
     ]
 
 
+def test_group_panel_marks_write_command_as_admin_only() -> None:
+    items = {item["name"]: item for item in build_group_panel()["items"]}
+
+    assert items["追踪术"]["only_admin"] is True
+    assert items["撒情况"]["only_admin"] is False
+
+
+def test_configure_finds_existing_panel_after_first_page() -> None:
+    calls: list[tuple[str, str, dict[str, Any] | None]] = []
+
+    async def request(route, **kwargs):
+        params = kwargs.get("params")
+        calls.append((route.method, route.path, params))
+        if route.method == "GET":
+            if params and params.get("cursor") == "next":
+                return {
+                    "records": [
+                        {"panel_id": "panel-id", "panel": {"remark": GROUP_PANEL_REMARK}}
+                    ],
+                    "next_cursor": "",
+                    "is_end": True,
+                }
+            return {
+                "records": [{"panel_id": "other", "panel": {"remark": "other"}}],
+                "next_cursor": "next",
+                "is_end": False,
+            }
+        return {}
+
+    asyncio.run(QQCommandDiscoveryService(request).configure())
+
+    assert [call for call in calls if call[0] == "GET"] == [
+        ("GET", "/v2/panels", {"scope": "group", "limit": 50}),
+        ("GET", "/v2/panels", {"scope": "group", "limit": 50, "cursor": "next"}),
+    ]
+    assert calls[-1][:2] == ("PUT", "/v2/panels/panel-id")
+    assert ("POST", "/v2/panels") not in [(method, path) for method, path, _ in calls]
+
+
 def test_configure_accepts_wrapped_empty_panel_response() -> None:
     calls: list[tuple[str, str]] = []
 

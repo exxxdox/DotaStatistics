@@ -12,6 +12,8 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
+DEFAULT_TOTAL_LIMIT_BYTES = 2_000_000_000
+
 
 class ConversationMemory:
     def __init__(
@@ -19,9 +21,12 @@ class ConversationMemory:
         root: Path,
         user_limit_bytes: int = 100_000_000,
         group_limit_bytes: int = 200_000_000,
+        total_limit_bytes: int = DEFAULT_TOTAL_LIMIT_BYTES,
     ) -> None:
         if min(user_limit_bytes, group_limit_bytes) < 16_384:
             raise ValueError("Conversation limits must be at least 16384 bytes")
+        if total_limit_bytes < 16_384:
+            raise ValueError("Conversation total limit must be at least 16384 bytes")
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
         self._secure_permissions(self.root, 0o700)
@@ -30,11 +35,51 @@ class ConversationMemory:
                 self._secure_permissions(database, 0o600)
         self.user_limit_bytes = user_limit_bytes
         self.group_limit_bytes = group_limit_bytes
+        self.total_limit_bytes = total_limit_bytes
+        # 启动时先回收最旧会话，避免历史版本留下的数据长期超出总预算。
+        self._enforce_total_limit(None)
 
     @staticmethod
     def _secure_permissions(path: Path, mode: int) -> None:
         if os.name == "posix":
             path.chmod(mode)
+
+    def _enforce_total_limit(self, active_path: Path | None) -> None:
+        """按最后活动时间淘汰最旧会话，给所有数据库一个总容量预算。"""
+        databases = [
+            path
+            for path in self.root.glob("*.sqlite3")
+            if path.is_file() and not path.is_symlink()
+        ]
+        # 并发写入可能同时淘汰同一文件，进程内也不能假设目录快照始终有效。
+        total = 0
+        for path in databases:
+            try:
+                total += path.stat().st_size
+            except OSError:
+                continue
+        if total <= self.total_limit_bytes:
+            return
+        # 当前正在写入的数据库始终保留；删除失败说明仍有进程使用，跳过本次。
+        for path in sorted(
+            (path for path in databases if path != active_path),
+            key=self._file_mtime_ns,
+        ):
+            if total <= self.total_limit_bytes:
+                break
+            try:
+                size = path.stat().st_size
+                path.unlink()
+            except OSError:
+                continue
+            total -= size
+
+    @staticmethod
+    def _file_mtime_ns(path: Path) -> int:
+        try:
+            return path.stat().st_mtime_ns
+        except OSError:
+            return 0
 
     def _location(self, conversation_id: str) -> tuple[Path, int]:
         kind, separator, identity = conversation_id.partition(":")
@@ -59,15 +104,33 @@ class ConversationMemory:
             # DELETE journal and FULL vacuum avoid an indefinitely growing WAL or free pages.
             connection.execute("PRAGMA page_size = 4096")
             connection.execute("PRAGMA auto_vacuum = FULL")
-            connection.execute(f"PRAGMA max_page_count = {limit // 4096}")
             connection.execute(
                 "CREATE TABLE IF NOT EXISTS messages "
                 "(id INTEGER PRIMARY KEY AUTOINCREMENT, payload BLOB NOT NULL)"
             )
+            ConversationMemory._shrink_to_limit(connection, limit)
             return connection
         except BaseException:
             connection.close()
             raise
+
+    @staticmethod
+    def _shrink_to_limit(connection: sqlite3.Connection, limit: int) -> None:
+        """让已有数据库也服从当前上限；max_page_count 本身不会缩小旧文件。"""
+        max_pages = limit // 4096
+        connection.execute(f"PRAGMA max_page_count = {max_pages}")
+        page_count = connection.execute("PRAGMA page_count").fetchone()[0]
+        while page_count > max_pages:
+            # 分批淘汰最旧记录，直到物理页数降到配置上限以内。
+            cursor = connection.execute(
+                "DELETE FROM messages WHERE id IN "
+                "(SELECT id FROM messages ORDER BY id LIMIT 50)"
+            )
+            if cursor.rowcount == 0:
+                break
+            page_count = connection.execute("PRAGMA page_count").fetchone()[0]
+        # 峰值页数曾被压在上限之上时，淘汰后必须重新设置才真正降低当前连接的限制。
+        connection.execute(f"PRAGMA max_page_count = {max_pages}")
 
     def _ensure_fits(
         self, payload: bytes, limit: int, *, pending: bool = False,
@@ -212,6 +275,7 @@ class ConversationMemory:
                 "INSERT OR REPLACE INTO pending(speaker, payload) VALUES (?, ?)",
                 (speaker, payload), payload, limit, pending=True,
             )
+        self._enforce_total_limit(path)
 
     def append(
         self,
@@ -243,7 +307,9 @@ class ConversationMemory:
                 connection, "INSERT INTO messages(payload) VALUES (?)", (payload,), payload, limit,
             )
             assert cursor.lastrowid is not None
-            return cursor.lastrowid
+            message_id = cursor.lastrowid
+        self._enforce_total_limit(path)
+        return message_id
 
     def clear(self, conversation_id: str) -> None:
         """清空当前会话的记录和所有成员追问，不影响其他会话或选手资料。"""

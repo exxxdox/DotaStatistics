@@ -41,13 +41,16 @@ class PlayerRepository:
     def set(self, nickname: str, dota_id: int) -> None:
         """绑定或更新昵称对应的 Dota ID，并立即写回磁盘。"""
         with self._lock:
-            for record in self._records:
+            # 在副本上修改并先落盘；保存失败时内存必须继续等于磁盘旧值。
+            updated = [dict(record) for record in self._records]
+            for record in updated:
                 if record["nick_name"] == nickname:
                     record["dota_id"] = dota_id
                     break
             else:
-                self._records.append({"nick_name": nickname, "dota_id": dota_id})
-            self._save()
+                updated.append({"nick_name": nickname, "dota_id": dota_id})
+            self._save(updated)
+            self._records = updated
 
     def get(self, nickname: str) -> int | None:
         with self._lock:
@@ -69,7 +72,7 @@ class PlayerRepository:
                 bindings.setdefault(record["nick_name"], record["dota_id"])
             return bindings
 
-    def _save(self) -> None:
+    def _save(self, records: list[dict[str, Any]]) -> None:
         self.file_path.parent.mkdir(parents=True, exist_ok=True)
         self._secure_permissions(self.file_path.parent, 0o700)
         temporary_path: Path | None = None
@@ -79,13 +82,22 @@ class PlayerRepository:
                 prefix=f".{self.file_path.name}.", delete=False,
             ) as temporary:
                 temporary_path = Path(temporary.name)
-                json.dump(self._records, temporary, ensure_ascii=False, indent=4)
+                json.dump(records, temporary, ensure_ascii=False, indent=4)
                 temporary.flush()
                 os.fsync(temporary.fileno())
             self._secure_permissions(temporary_path, 0o600)
             # 同目录替换保证崩溃时保留旧文件或得到完整新文件。
             os.replace(temporary_path, self.file_path)
             temporary_path = None
+            if os.name == "posix":
+                directory = os.open(self.file_path.parent, os.O_RDONLY)
+                try:
+                    # 目录项也要落盘；个别文件系统不支持目录 fsync，此时替换已完成。
+                    os.fsync(directory)
+                except OSError:
+                    pass
+                finally:
+                    os.close(directory)
         finally:
             if temporary_path is not None:
                 temporary_path.unlink(missing_ok=True)
