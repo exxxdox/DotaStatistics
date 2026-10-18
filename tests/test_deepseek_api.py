@@ -122,6 +122,46 @@ def test_general_chat_executes_tool_and_returns_final_answer(
     }
 
 
+def test_general_chat_only_exposes_tools_for_current_dota_intent(
+    monkeypatch, memory_store
+) -> None:
+    client = build_client()
+    monkeypatch.setattr(deepseek_api, "get_client", lambda: client)
+    tools = [{"type": "function", "function": {"name": "lookup"}}]
+    execute_tool = Mock()
+
+    deepseek_api.deepseek_general(
+        "你好", "c2c:user-a",
+        tool_definitions=tools, execute_tool=execute_tool,
+    )
+    plain_request = client.chat.completions.create.call_args.kwargs
+    assert "tools" not in plain_request
+    assert "tool_choice" not in plain_request
+
+    deepseek_api.deepseek_general(
+        "查一下Dota段位", "c2c:user-a",
+        tool_definitions=tools, execute_tool=execute_tool,
+    )
+    assert client.chat.completions.create.call_args.kwargs["tools"] == tools
+    execute_tool.assert_not_called()
+
+
+def test_general_chat_enables_tools_when_current_message_mentions_bound_nickname(
+    monkeypatch, memory_store
+) -> None:
+    client = build_client()
+    monkeypatch.setattr(deepseek_api, "get_client", lambda: client)
+    tools = [{"type": "function", "function": {"name": "lookup"}}]
+
+    deepseek_api.deepseek_general(
+        "小明最近怎么样", "c2c:user-a",
+        player_bindings=lambda: {"小明": 123}, tool_definitions=tools,
+        execute_tool=Mock(),
+    )
+
+    assert client.chat.completions.create.call_args.kwargs["tools"] == tools
+
+
 @pytest.mark.parametrize("arguments", ["not-json", "[]"])
 def test_general_chat_returns_invalid_arguments_as_tool_error(
     monkeypatch, memory_store, arguments: str
@@ -140,7 +180,7 @@ def test_general_chat_returns_invalid_arguments_as_tool_error(
     execute_tool = Mock()
 
     assert deepseek_api.deepseek_general(
-        "查询", "c2c:user-a",
+        "查询Dota战绩", "c2c:user-a",
         tool_definitions=[{"type": "function", "function": {"name": "recent_matches"}}],
         execute_tool=execute_tool,
     ) == "参数有误"
@@ -151,12 +191,20 @@ def test_general_chat_returns_invalid_arguments_as_tool_error(
     assert tool_result["tool_call_id"] == "call-bad"
 
 
-def test_general_chat_limits_tool_execution_to_four_calls(
-    monkeypatch, memory_store
+@pytest.mark.parametrize(
+    ("configured_limit", "expected_limit"),
+    [(None, 4), ("2", 2)],
+)
+def test_general_chat_limits_tool_execution_from_environment(
+    monkeypatch, memory_store, configured_limit: str | None, expected_limit: int
 ) -> None:
+    if configured_limit is None:
+        monkeypatch.delenv("DOTA_AGENT_MAX_TOOL_CALLS", raising=False)
+    else:
+        monkeypatch.setenv("DOTA_AGENT_MAX_TOOL_CALLS", configured_limit)
     client = build_client()
     calls = [
-        build_tool_call(f"call-{index}", "lookup", "{}") for index in range(5)
+        build_tool_call(f"call-{index}", "lookup", "{}") for index in range(1_000)
     ]
     client.chat.completions.create.side_effect = [
         SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(
@@ -170,18 +218,54 @@ def test_general_chat_limits_tool_execution_to_four_calls(
     execute_tool = Mock(return_value="ok")
 
     assert deepseek_api.deepseek_general(
-        "批量查询", "c2c:user-a",
+        "批量查询Dota比赛", "c2c:user-a",
         tool_definitions=[{"type": "function", "function": {"name": "lookup"}}],
         execute_tool=execute_tool,
     ) == "查询完成"
 
-    assert execute_tool.call_count == 4
+    assert execute_tool.call_count == expected_limit
     messages = client.chat.completions.create.call_args_list[1].kwargs["messages"]
     tool_results = [message for message in messages if message["role"] == "tool"]
-    assert len(tool_results) == 5
-    assert json.loads(tool_results[-1]["content"]) == {
-        "error": "工具调用总数超过4次"
-    }
+    assert len(tool_results) == expected_limit
+    assistant_calls = [
+        message for message in messages if message["role"] == "assistant"
+    ][0]["tool_calls"]
+    assert len(assistant_calls) == expected_limit
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "invalid"])
+def test_tool_call_limit_rejects_invalid_environment(monkeypatch, value: str) -> None:
+    monkeypatch.setenv("DOTA_AGENT_MAX_TOOL_CALLS", value)
+
+    with pytest.raises(RuntimeError, match="DOTA_AGENT_MAX_TOOL_CALLS 必须是正整数"):
+        deepseek_api._max_tool_calls()
+
+
+def test_general_chat_rejects_oversized_tool_arguments(
+    monkeypatch, memory_store
+) -> None:
+    client = build_client()
+    client.chat.completions.create.side_effect = [
+        SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(
+            content=None,
+            tool_calls=[build_tool_call("call-large", "lookup", "x" * 2_049)],
+        ))]),
+        SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(
+            content="参数过长", tool_calls=None,
+        ))]),
+    ]
+    monkeypatch.setattr(deepseek_api, "get_client", lambda: client)
+    execute_tool = Mock()
+
+    assert deepseek_api.deepseek_general(
+        "查询Dota比赛", "c2c:user-a",
+        tool_definitions=[{"type": "function", "function": {"name": "lookup"}}],
+        execute_tool=execute_tool,
+    ) == "参数过长"
+
+    execute_tool.assert_not_called()
+    result = client.chat.completions.create.call_args_list[1].kwargs["messages"][-1]
+    assert json.loads(result["content"]) == {"error": "工具参数无效"}
 
 
 def test_general_chat_stops_if_model_ignores_final_tool_choice(
@@ -196,7 +280,7 @@ def test_general_chat_stops_if_model_ignores_final_tool_choice(
     execute_tool = Mock(return_value="ok")
 
     result = deepseek_api.deepseek_general(
-        "循环查询", "c2c:user-a",
+        "循环查询Dota比赛", "c2c:user-a",
         tool_definitions=[{"type": "function", "function": {"name": "lookup"}}],
         execute_tool=execute_tool,
     )

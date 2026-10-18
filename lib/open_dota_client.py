@@ -3,6 +3,7 @@ import logging
 import os
 import threading
 import time
+import unicodedata
 from collections.abc import Callable
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
@@ -22,6 +23,77 @@ DEFAULT_HERO_STATS_CACHE_PATH = hero_stats_cache_path
 RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504, 522, 524}
 STAT_PERIOD_DAYS = 30
 CACHE_SCHEMA_VERSION = 2
+AGENT_QUERY_TIMEOUT_SECONDS = 10.0
+MAX_EXTERNAL_TEXT_CHARS = 160
+
+PLAYER_VIEW_FIELDS = {
+    "win_loss": ("win", "lose"),
+    "heroes": (
+        "hero_id", "last_played", "games", "win", "with_games", "with_win",
+        "against_games", "against_win",
+    ),
+    "peers": (
+        "account_id", "personaname", "last_played", "games", "win",
+        "with_games", "with_win", "against_games", "against_win",
+    ),
+    "totals": ("field", "n", "sum"),
+    "ratings": ("account_id", "match_id", "rank_tier", "time"),
+    "rankings": ("hero_id", "score", "percent_rank", "card"),
+}
+HERO_VIEW_FIELDS = {
+    "matchups": ("hero_id", "games_played", "wins"),
+    "durations": ("duration_bin", "games_played", "wins"),
+    "recent_matches": (
+        "match_id", "duration", "start_time", "radiant_team_id", "radiant_name",
+        "dire_team_id", "dire_name", "leagueid", "league_name", "series_id",
+        "series_type", "radiant_score", "dire_score", "radiant_win", "radiant",
+    ),
+}
+TEAM_VIEW_FIELDS = {
+    "overview": (
+        "team_id", "rating", "wins", "losses", "last_match_time", "name", "tag",
+    ),
+    "matches": (
+        "match_id", "radiant", "radiant_win", "radiant_score", "dire_score",
+        "duration", "start_time", "leagueid", "league_name", "cluster",
+        "opposing_team_id", "opposing_team_name",
+    ),
+    "players": (
+        "account_id", "name", "games_played", "wins", "is_current_team_member",
+    ),
+    "heroes": ("hero_id", "name", "games_played", "wins"),
+}
+GLOBAL_VIEW_FIELDS = {
+    "live_matches": (
+        "match_id", "game_time", "average_mmr", "game_mode", "league_id",
+        "series_id", "team_id_radiant", "team_name_radiant", "team_id_dire",
+        "team_name_dire",
+    ),
+    "pro_matches": (
+        "match_id", "duration", "start_time", "radiant_team_id", "radiant_name",
+        "dire_team_id", "dire_name", "leagueid", "league_name", "series_id",
+        "series_type", "radiant_score", "dire_score", "radiant_win",
+    ),
+    "public_matches": (
+        "match_id", "match_seq_num", "radiant_win", "start_time", "duration",
+        "lobby_type", "game_mode", "avg_rank_tier", "num_rank_tier", "cluster",
+    ),
+    "top_players": (
+        "account_id", "personaname", "rank_tier", "leaderboard_rank",
+    ),
+    "hero_stats": (
+        "hero_id", "id", "localized_name", "primary_attr", "attack_type",
+        "pro_pick", "pro_win", "pro_ban", "turbo_picks", "turbo_wins",
+        "1_pick", "1_win", "2_pick", "2_win", "3_pick", "3_win", "4_pick",
+        "4_win", "5_pick", "5_win", "6_pick", "6_win", "7_pick", "7_win",
+        "8_pick", "8_win",
+    ),
+    "pro_players": (
+        "account_id", "personaname", "name", "full_history_time", "country_code",
+        "fantasy_role", "team_id", "team_name", "team_tag", "is_locked",
+        "is_pro", "locked_until",
+    ),
+}
 
 
 def _utc_now() -> datetime:
@@ -134,6 +206,155 @@ class OpenDotaApiClient:
             for hero in payload
             if isinstance(hero, dict) and "id" in hero and "name" in hero
         }
+
+    def get_player_data(
+        self,
+        account_id: int,
+        view: str,
+        *,
+        days: int,
+        limit: int,
+    ) -> Any:
+        """查询玩家只读数据；固定视图阻止模型构造任意 API 路径。"""
+        self._validate_positive_int(account_id, "account_id")
+        self._validate_range(days, "days", 1, 365)
+        self._validate_range(limit, "limit", 1, 20)
+        allowed_views = {"profile", "counts", *PLAYER_VIEW_FIELDS}
+        if not isinstance(view, str) or view not in allowed_views:
+            raise ValueError("view 不是允许的玩家查询")
+
+        endpoints = {
+            "profile": "",
+            "win_loss": "/wl",
+            "heroes": "/heroes",
+            "peers": "/peers",
+            "totals": "/totals",
+            "counts": "/counts",
+            "ratings": "/ratings",
+            "rankings": "/rankings",
+        }
+        path = f"/players/{account_id}{endpoints[view]}"
+        params = (
+            {"date": days, "limit": limit}
+            if view in {"win_loss", "heroes", "peers", "totals", "counts"}
+            else None
+        )
+        # Agent 查询快速失败，避免一次对话被上游重试阻塞数分钟。
+        payload = self._get(
+            path,
+            params=params,
+            timeout=AGENT_QUERY_TIMEOUT_SECONDS,
+            max_retries=0,
+        )
+        if view == "profile":
+            return self._project_player_profile(payload)
+        if view == "counts":
+            return self._project_counts(payload, limit)
+        fields = PLAYER_VIEW_FIELDS[view]
+        if view == "win_loss":
+            return self._project_object(payload, fields, "玩家胜负")
+        return self._project_rows(payload, fields, limit, f"玩家 {view}")
+
+    def get_match_data(self, match_id: int) -> dict[str, Any]:
+        """返回单场核心数据，排除聊天、头像和其他无界字段。"""
+        self._validate_positive_int(match_id, "match_id")
+        payload = self._get(
+            f"/matches/{match_id}",
+            timeout=AGENT_QUERY_TIMEOUT_SECONDS,
+            max_retries=0,
+        )
+        result = self._project_object(
+            payload,
+            (
+                "match_id", "duration", "start_time", "radiant_win",
+                "radiant_score", "dire_score", "game_mode", "lobby_type",
+                "leagueid", "league_name", "patch", "region",
+            ),
+            "比赛",
+        )
+        players = payload.get("players")
+        if players is not None:
+            result["players"] = self._project_rows(
+                players,
+                (
+                    "account_id", "player_slot", "hero_id", "kills", "deaths",
+                    "assists", "gold_per_min", "xp_per_min", "hero_damage",
+                    "tower_damage", "hero_healing", "last_hits", "denies", "level",
+                    "total_gold", "total_xp", "isRadiant", "win", "lose",
+                    "leaver_status",
+                ),
+                10,
+                "比赛玩家",
+            )
+        return result
+
+    def get_hero_data(self, hero_id: int, view: str, *, limit: int) -> Any:
+        """查询英雄只读数据；排行榜使用固定的全局 rankings 端点。"""
+        self._validate_positive_int(hero_id, "hero_id")
+        self._validate_range(limit, "limit", 1, 20)
+        allowed_views = {*HERO_VIEW_FIELDS, "rankings"}
+        if not isinstance(view, str) or view not in allowed_views:
+            raise ValueError("view 不是允许的英雄查询")
+
+        if view == "rankings":
+            path = "/rankings"
+            params = {"hero_id": hero_id}
+        else:
+            endpoint = "matches" if view == "recent_matches" else view
+            path = f"/heroes/{hero_id}/{endpoint}"
+            params = None
+        payload = self._get(
+            path,
+            params=params,
+            timeout=AGENT_QUERY_TIMEOUT_SECONDS,
+            max_retries=0,
+        )
+        if view == "rankings":
+            return self._project_hero_rankings(payload, limit)
+        return self._project_rows(
+            payload, HERO_VIEW_FIELDS[view], limit, f"英雄 {view}"
+        )
+
+    def get_team_data(self, team_id: int, view: str, *, limit: int) -> Any:
+        """查询职业战队只读数据，结果限制为模型所需的核心字段。"""
+        self._validate_positive_int(team_id, "team_id")
+        self._validate_range(limit, "limit", 1, 20)
+        if not isinstance(view, str) or view not in TEAM_VIEW_FIELDS:
+            raise ValueError("view 不是允许的战队查询")
+
+        suffix = "" if view == "overview" else f"/{view}"
+        payload = self._get(
+            f"/teams/{team_id}{suffix}",
+            timeout=AGENT_QUERY_TIMEOUT_SECONDS,
+            max_retries=0,
+        )
+        if view == "overview":
+            return self._project_object(payload, TEAM_VIEW_FIELDS[view], "战队")
+        return self._project_rows(
+            payload, TEAM_VIEW_FIELDS[view], limit, f"战队 {view}"
+        )
+
+    def get_global_data(self, view: str, *, limit: int) -> Any:
+        """查询固定的 OpenDota 全局只读数据，不接受任意资源名称。"""
+        self._validate_range(limit, "limit", 1, 20)
+        paths = {
+            "live_matches": "/live",
+            "pro_matches": "/proMatches",
+            "public_matches": "/publicMatches",
+            "top_players": "/playersByRank",
+            "hero_stats": "/heroStats",
+            "pro_players": "/proPlayers",
+        }
+        if not isinstance(view, str) or view not in paths:
+            raise ValueError("view 不是允许的全局查询")
+        payload = self._get(
+            paths[view],
+            timeout=AGENT_QUERY_TIMEOUT_SECONDS,
+            max_retries=0,
+        )
+        return self._project_rows(
+            payload, GLOBAL_VIEW_FIELDS[view], limit, f"全局 {view}"
+        )
 
     def get_recent_matches(self, account_id: int, limit: int = 5) -> str | None:
         """默认展示最近五场天梯比赛；上游异常时返回 None。"""
@@ -420,11 +641,134 @@ GROUP BY hero_id
         message = str(error).casefold()
         return "statement timeout" in message or "query read timeout" in message
 
-    def _get(self, path: str, params: dict[str, Any] | None = None) -> Any:
-        for attempt in range(self.max_retries + 1):
+    @staticmethod
+    def _validate_positive_int(value: Any, name: str) -> None:
+        if type(value) is not int or value <= 0:
+            raise ValueError(f"{name} 必须是正整数")
+
+    @staticmethod
+    def _validate_range(value: Any, name: str, minimum: int, maximum: int) -> None:
+        if type(value) is not int or not minimum <= value <= maximum:
+            raise ValueError(f"{name} 必须是 {minimum} 至 {maximum} 的整数")
+
+    @staticmethod
+    def _safe_scalar(value: Any) -> Any:
+        if isinstance(value, str):
+            # 外部名称只作为数据展示；移除控制与零宽字符，避免隐藏指令进入模型。
+            cleaned = "".join(
+                char for char in value
+                if unicodedata.category(char) not in {"Cc", "Cf"}
+            )
+            return cleaned[:MAX_EXTERNAL_TEXT_CHARS]
+        if value is None or type(value) in {bool, int, float}:
+            return value
+        return None
+
+    @classmethod
+    def _project_object(
+        cls,
+        payload: Any,
+        fields: tuple[str, ...],
+        label: str,
+    ) -> dict[str, Any]:
+        if not isinstance(payload, dict):
+            raise OpenDotaApiError(f"OpenDota {label}响应格式错误")
+        result: dict[str, Any] = {}
+        for field in fields:
+            if field not in payload:
+                continue
+            value = cls._safe_scalar(payload[field])
+            if value is not None or payload[field] is None:
+                result[field] = value
+        return result
+
+    @classmethod
+    def _project_rows(
+        cls,
+        payload: Any,
+        fields: tuple[str, ...],
+        limit: int,
+        label: str,
+    ) -> list[dict[str, Any]]:
+        if not isinstance(payload, list):
+            raise OpenDotaApiError(f"OpenDota {label}响应格式错误")
+        return [
+            cls._project_object(row, fields, label)
+            for row in payload[:limit]
+            if isinstance(row, dict)
+        ]
+
+    @classmethod
+    def _project_player_profile(cls, payload: Any) -> dict[str, Any]:
+        result = cls._project_object(
+            payload,
+            ("rank_tier", "leaderboard_rank", "computed_mmr", "computed_mmr_turbo"),
+            "玩家资料",
+        )
+        profile = payload.get("profile")
+        if isinstance(profile, dict):
+            result["profile"] = cls._project_object(
+                profile,
+                (
+                    "account_id", "personaname", "name", "plus", "cheese",
+                    "last_login", "loccountrycode", "is_contributor", "is_subscriber",
+                ),
+                "玩家资料",
+            )
+        return result
+
+    @classmethod
+    def _project_counts(cls, payload: Any, limit: int) -> dict[str, dict[str, Any]]:
+        if not isinstance(payload, dict):
+            raise OpenDotaApiError("OpenDota 玩家 counts 响应格式错误")
+        result: dict[str, dict[str, Any]] = {}
+        for category in (
+            "leaver_status", "game_mode", "lobby_type", "lane_role", "region", "patch"
+        ):
+            counts = payload.get(category)
+            if not isinstance(counts, dict):
+                continue
+            # 分类键来自 OpenDota；限制长度和数量，避免异常响应撑大模型上下文。
+            projected_counts: dict[str, Any] = {}
+            for key, value in list(counts.items())[:limit]:
+                if isinstance(value, dict):
+                    projected = cls._project_object(
+                        value, ("games", "win"), "玩家 counts"
+                    )
+                    if projected:
+                        projected_counts[str(key)[:32]] = projected
+                elif type(value) in {int, float}:
+                    projected_counts[str(key)[:32]] = value
+            result[category] = projected_counts
+        return result
+
+    @classmethod
+    def _project_hero_rankings(cls, payload: Any, limit: int) -> dict[str, Any]:
+        result = cls._project_object(payload, ("hero_id",), "英雄排行榜")
+        rankings = payload.get("rankings")
+        if rankings is not None:
+            result["rankings"] = cls._project_rows(
+                rankings,
+                ("account_id", "score", "percent_rank", "card", "personaname"),
+                limit,
+                "英雄排行榜",
+            )
+        return result
+
+    def _get(
+        self,
+        path: str,
+        params: dict[str, Any] | None = None,
+        *,
+        timeout: float | None = None,
+        max_retries: int | None = None,
+    ) -> Any:
+        request_timeout = self.timeout if timeout is None else timeout
+        retry_count = self.max_retries if max_retries is None else max_retries
+        for attempt in range(retry_count + 1):
             try:
                 response = self.session.get(
-                    f"{self.BASE_URL}{path}", params=params, timeout=self.timeout
+                    f"{self.BASE_URL}{path}", params=params, timeout=request_timeout
                 )
                 response.raise_for_status()
                 return response.json()
@@ -433,7 +777,7 @@ GROUP BY hero_id
                 retryable = (
                     status_code is None or status_code in RETRYABLE_STATUS_CODES
                 )
-                if retryable and attempt < self.max_retries:
+                if retryable and attempt < retry_count:
                     # 上游偶发超时很常见；短退避重试，避免瞬时故障直接影响用户。
                     self._sleep(self.retry_backoff * (2**attempt))
                     continue

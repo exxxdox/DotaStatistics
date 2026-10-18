@@ -36,8 +36,10 @@ class FakeSession:
         self.responses = responses
         self.headers: dict[str, str] = {}
         self.calls = 0
+        self.requests: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
 
-    def get(self, *_args, **_kwargs) -> FakeResponse:
+    def get(self, *args, **kwargs) -> FakeResponse:
+        self.requests.append((args, kwargs))
         response = self.responses[self.calls]
         self.calls += 1
         return response
@@ -569,3 +571,226 @@ def test_get_heroes_returns_id_to_name_mapping() -> None:
     )
 
     assert client.get_heroes() == {1: "anti-mage", 2: "axe"}
+
+
+def test_agent_player_profile_uses_fixed_endpoint_and_removes_private_links() -> None:
+    session = FakeSession([FakeResponse(200, {
+        "rank_tier": 75,
+        "leaderboard_rank": 42,
+        "profile": {
+            "account_id": 123,
+            "personaname": "A" * 200 + "\u200b\n隐藏",
+            "loccountrycode": "CN",
+            "steamid": "private-steam-id",
+            "avatarfull": "https://example.invalid/avatar",
+            "profileurl": "https://example.invalid/profile",
+        },
+    })])
+    client = OpenDotaApiClient(session=session, max_retries=2, cache_path=None)
+
+    result = client.get_player_data(123, "profile", days=30, limit=10)
+
+    assert result["rank_tier"] == 75
+    assert result["profile"] == {
+        "account_id": 123,
+        "personaname": "A" * 160,
+        "loccountrycode": "CN",
+    }
+    assert session.requests == [((f"{client.BASE_URL}/players/123",), {
+        "params": None,
+        "timeout": 10.0,
+    })]
+
+
+@pytest.mark.parametrize(
+    ("view", "endpoint", "params", "payload", "expected"),
+    [
+        ("win_loss", "wl", {"date": 30, "limit": 2}, {"win": 7, "lose": 3, "x": 1}, {"win": 7, "lose": 3}),
+        ("heroes", "heroes", {"date": 30, "limit": 2}, [{"hero_id": 1, "games": 9, "img": "x"}] * 3, [{"hero_id": 1, "games": 9}] * 2),
+        ("peers", "peers", {"date": 30, "limit": 2}, [{"account_id": 8, "personaname": "P", "avatar": "x"}], [{"account_id": 8, "personaname": "P"}]),
+        ("totals", "totals", {"date": 30, "limit": 2}, [{"field": "kills", "n": 3, "sum": 9, "other": 1}], [{"field": "kills", "n": 3, "sum": 9}]),
+        ("ratings", "ratings", None, [{"rank_tier": 70, "time": 1, "steamid": "x"}], [{"rank_tier": 70, "time": 1}]),
+        ("rankings", "rankings", None, [{"hero_id": 2, "score": 4, "avatar": "x"}], [{"hero_id": 2, "score": 4}]),
+    ],
+)
+def test_agent_player_views_use_exact_paths_params_and_projection(
+    view: str,
+    endpoint: str,
+    params: dict[str, int] | None,
+    payload: Any,
+    expected: Any,
+) -> None:
+    session = FakeSession([FakeResponse(200, payload)])
+    client = OpenDotaApiClient(session=session, cache_path=None)
+
+    assert client.get_player_data(123, view, days=30, limit=2) == expected
+    assert session.requests[0] == ((
+        f"{client.BASE_URL}/players/123/{endpoint}",
+    ), {"params": params, "timeout": 10.0})
+
+
+def test_agent_player_counts_bounds_categories_and_entries() -> None:
+    session = FakeSession([FakeResponse(200, {
+        "game_mode": {
+            "1": {"games": 10, "win": 6, "unsafe": "drop"},
+            "2": {"games": 8, "win": 4},
+            "3": {"games": 6, "win": 3},
+        },
+        "region": {"1": 4},
+        "wordcloud": {"unsafe": 99},
+    })])
+    client = OpenDotaApiClient(session=session, cache_path=None)
+
+    result = client.get_player_data(123, "counts", days=7, limit=2)
+
+    assert result == {
+        "game_mode": {
+            "1": {"games": 10, "win": 6},
+            "2": {"games": 8, "win": 4},
+        },
+        "region": {"1": 4},
+    }
+    assert session.requests[0][1]["params"] == {"date": 7, "limit": 2}
+
+
+def test_agent_match_query_projects_core_fields_and_ten_players() -> None:
+    players = [
+        {
+            "account_id": index,
+            "hero_id": index + 1,
+            "kills": index,
+            "personaname": "hidden",
+            "chat": [{"key": "hidden"}],
+        }
+        for index in range(12)
+    ]
+    session = FakeSession([FakeResponse(200, {
+        "match_id": 99,
+        "duration": 3000,
+        "league_name": "L" * 200,
+        "players": players,
+        "chat": [{"key": "hidden"}],
+    })])
+    client = OpenDotaApiClient(session=session, cache_path=None)
+
+    result = client.get_match_data(99)
+
+    assert result["league_name"] == "L" * 160
+    assert len(result["players"]) == 10
+    assert result["players"][0] == {"account_id": 0, "hero_id": 1, "kills": 0}
+    assert "chat" not in result
+    assert session.requests[0] == ((f"{client.BASE_URL}/matches/99",), {
+        "params": None,
+        "timeout": 10.0,
+    })
+
+
+@pytest.mark.parametrize(
+    ("view", "path", "params", "payload", "expected"),
+    [
+        ("matchups", "/heroes/7/matchups", None, [{"hero_id": 2, "games_played": 4, "wins": 3, "x": 1}], [{"hero_id": 2, "games_played": 4, "wins": 3}]),
+        ("durations", "/heroes/7/durations", None, [{"duration_bin": "30", "games_played": 4, "wins": 2}], [{"duration_bin": "30", "games_played": 4, "wins": 2}]),
+        ("recent_matches", "/heroes/7/matches", None, [{"match_id": 4, "radiant_name": "A", "radiant_logo": "x"}], [{"match_id": 4, "radiant_name": "A"}]),
+        ("rankings", "/rankings", {"hero_id": 7}, {"hero_id": 7, "rankings": [{"account_id": 3, "score": 2, "steamid": "x"}]}, {"hero_id": 7, "rankings": [{"account_id": 3, "score": 2}]}),
+    ],
+)
+def test_agent_hero_views_use_fixed_endpoints(
+    view: str,
+    path: str,
+    params: dict[str, int] | None,
+    payload: Any,
+    expected: Any,
+) -> None:
+    session = FakeSession([FakeResponse(200, payload)])
+    client = OpenDotaApiClient(session=session, cache_path=None)
+
+    assert client.get_hero_data(7, view, limit=2) == expected
+    assert session.requests[0] == ((f"{client.BASE_URL}{path}",), {
+        "params": params,
+        "timeout": 10.0,
+    })
+
+
+@pytest.mark.parametrize(
+    ("view", "path", "payload", "expected"),
+    [
+        ("overview", "/teams/5", {"team_id": 5, "name": "Team", "logo_url": "x"}, {"team_id": 5, "name": "Team"}),
+        ("matches", "/teams/5/matches", [{"match_id": 1, "opposing_team_name": "Other", "logo": "x"}], [{"match_id": 1, "opposing_team_name": "Other"}]),
+        ("players", "/teams/5/players", [{"account_id": 2, "name": "Player", "steamid": "x"}], [{"account_id": 2, "name": "Player"}]),
+        ("heroes", "/teams/5/heroes", [{"hero_id": 3, "games_played": 2, "img": "x"}], [{"hero_id": 3, "games_played": 2}]),
+    ],
+)
+def test_agent_team_views_use_fixed_endpoints(
+    view: str, path: str, payload: Any, expected: Any
+) -> None:
+    session = FakeSession([FakeResponse(200, payload)])
+    client = OpenDotaApiClient(session=session, cache_path=None)
+
+    assert client.get_team_data(5, view, limit=2) == expected
+    assert session.requests[0] == ((f"{client.BASE_URL}{path}",), {
+        "params": None,
+        "timeout": 10.0,
+    })
+
+
+@pytest.mark.parametrize(
+    ("view", "path", "payload", "expected"),
+    [
+        ("live_matches", "/live", [{"match_id": 1, "team_name_radiant": "A", "team_logo_radiant": "x"}], [{"match_id": 1, "team_name_radiant": "A"}]),
+        ("pro_matches", "/proMatches", [{"match_id": 2, "radiant_name": "A", "radiant_logo": "x"}], [{"match_id": 2, "radiant_name": "A"}]),
+        ("public_matches", "/publicMatches", [{"match_id": 3, "radiant_team": [1, 2]}], [{"match_id": 3}]),
+        ("top_players", "/playersByRank", [{"account_id": 4, "personaname": "P", "avatar": "x"}], [{"account_id": 4, "personaname": "P"}]),
+        ("hero_stats", "/heroStats", [{"hero_id": 5, "localized_name": "Hero", "img": "x"}], [{"hero_id": 5, "localized_name": "Hero"}]),
+        ("pro_players", "/proPlayers", [{"account_id": 6, "team_name": "T", "steamid": "x"}], [{"account_id": 6, "team_name": "T"}]),
+    ],
+)
+def test_agent_global_views_use_fixed_endpoints_and_limit_rows(
+    view: str, path: str, payload: Any, expected: Any
+) -> None:
+    session = FakeSession([FakeResponse(200, payload * 3)])
+    client = OpenDotaApiClient(session=session, cache_path=None)
+
+    assert client.get_global_data(view, limit=1) == expected
+    assert session.requests[0] == ((f"{client.BASE_URL}{path}",), {
+        "params": None,
+        "timeout": 10.0,
+    })
+
+
+@pytest.mark.parametrize(
+    ("method", "args", "kwargs"),
+    [
+        ("get_player_data", (True, "profile"), {"days": 1, "limit": 1}),
+        ("get_player_data", (1, "unknown"), {"days": 1, "limit": 1}),
+        ("get_player_data", (1, "profile"), {"days": 0, "limit": 1}),
+        ("get_player_data", (1, "profile"), {"days": 1, "limit": 21}),
+        ("get_match_data", (False,), {}),
+        ("get_hero_data", (0, "matchups"), {"limit": 1}),
+        ("get_hero_data", (1, "unknown"), {"limit": 1}),
+        ("get_team_data", (1, "overview"), {"limit": True}),
+        ("get_team_data", (1, "unknown"), {"limit": 1}),
+        ("get_global_data", ("unknown",), {"limit": 1}),
+    ],
+)
+def test_agent_queries_reject_invalid_values_before_network(
+    method: str,
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+) -> None:
+    session = FakeSession([])
+    client = OpenDotaApiClient(session=session, cache_path=None)
+
+    with pytest.raises(ValueError):
+        getattr(client, method)(*args, **kwargs)
+
+    assert session.calls == 0
+
+
+def test_agent_query_disables_retry_even_when_client_would_retry() -> None:
+    session = FakeSession([FakeResponse(522), FakeResponse(200, [])])
+    client = OpenDotaApiClient(session=session, max_retries=2, cache_path=None)
+
+    with pytest.raises(OpenDotaApiError):
+        client.get_global_data("live_matches", limit=1)
+
+    assert session.calls == 1
