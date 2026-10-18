@@ -1,3 +1,4 @@
+import json
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -21,6 +22,32 @@ def build_client(response_content: str = "回答") -> Mock:
     )
     client.with_options.return_value = client
     return client
+
+
+def build_tool_call(call_id: str, name: str, arguments: str) -> SimpleNamespace:
+    return SimpleNamespace(
+        id=call_id,
+        function=SimpleNamespace(name=name, arguments=arguments),
+    )
+
+
+def test_client_limits_timeout_and_retries(monkeypatch) -> None:
+    client_factory = Mock(return_value=Mock())
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
+    monkeypatch.setattr(deepseek_api, "OpenAI", client_factory)
+    deepseek_api.get_client.cache_clear()
+
+    try:
+        assert deepseek_api.get_client() is client_factory.return_value
+    finally:
+        deepseek_api.get_client.cache_clear()
+
+    client_factory.assert_called_once_with(
+        api_key="test-key",
+        base_url="https://api.deepseek.com",
+        timeout=30.0,
+        max_retries=1,
+    )
 
 
 def test_dota_analysis_uses_flash_thinking_mode(monkeypatch) -> None:
@@ -55,6 +82,129 @@ def test_general_chat_uses_flash_without_thinking(monkeypatch, memory_store) -> 
     assert "reasoning_effort" not in arguments
     assert arguments["extra_body"] == {"thinking": {"type": "disabled"}}
     client.with_options.assert_not_called()
+
+
+def test_general_chat_executes_tool_and_returns_final_answer(
+    monkeypatch, memory_store
+) -> None:
+    client = build_client()
+    client.chat.completions.create.side_effect = [
+        SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(
+            content=None,
+            tool_calls=[build_tool_call("call-1", "recent_matches", '{"nickname":"小明"}')],
+        ))]),
+        SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(
+            content="小明最近五场三胜两负", tool_calls=None,
+        ))]),
+    ]
+    monkeypatch.setattr(deepseek_api, "get_client", lambda: client)
+    execute_tool = Mock(return_value='{"wins":3,"losses":2}')
+    tools = [{
+        "type": "function",
+        "function": {"name": "recent_matches", "parameters": {"type": "object"}},
+    }]
+
+    result = deepseek_api.deepseek_general(
+        "小明最近战绩？", "c2c:user-a",
+        tool_definitions=tools, execute_tool=execute_tool,
+    )
+
+    assert result == "小明最近五场三胜两负"
+    execute_tool.assert_called_once_with("recent_matches", {"nickname": "小明"})
+    first_request, second_request = [
+        call.kwargs for call in client.chat.completions.create.call_args_list
+    ]
+    assert first_request["tools"] == tools
+    assert first_request["tool_choice"] == "auto"
+    assert second_request["messages"][-1] == {
+        "role": "tool", "tool_call_id": "call-1",
+        "content": '{"wins":3,"losses":2}',
+    }
+
+
+@pytest.mark.parametrize("arguments", ["not-json", "[]"])
+def test_general_chat_returns_invalid_arguments_as_tool_error(
+    monkeypatch, memory_store, arguments: str
+) -> None:
+    client = build_client()
+    client.chat.completions.create.side_effect = [
+        SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(
+            content=None,
+            tool_calls=[build_tool_call("call-bad", "recent_matches", arguments)],
+        ))]),
+        SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(
+            content="参数有误", tool_calls=None,
+        ))]),
+    ]
+    monkeypatch.setattr(deepseek_api, "get_client", lambda: client)
+    execute_tool = Mock()
+
+    assert deepseek_api.deepseek_general(
+        "查询", "c2c:user-a",
+        tool_definitions=[{"type": "function", "function": {"name": "recent_matches"}}],
+        execute_tool=execute_tool,
+    ) == "参数有误"
+
+    execute_tool.assert_not_called()
+    tool_result = client.chat.completions.create.call_args_list[1].kwargs["messages"][-1]
+    assert json.loads(tool_result["content"])["error"]
+    assert tool_result["tool_call_id"] == "call-bad"
+
+
+def test_general_chat_limits_tool_execution_to_four_calls(
+    monkeypatch, memory_store
+) -> None:
+    client = build_client()
+    calls = [
+        build_tool_call(f"call-{index}", "lookup", "{}") for index in range(5)
+    ]
+    client.chat.completions.create.side_effect = [
+        SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(
+            content=None, tool_calls=calls,
+        ))]),
+        SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(
+            content="查询完成", tool_calls=None,
+        ))]),
+    ]
+    monkeypatch.setattr(deepseek_api, "get_client", lambda: client)
+    execute_tool = Mock(return_value="ok")
+
+    assert deepseek_api.deepseek_general(
+        "批量查询", "c2c:user-a",
+        tool_definitions=[{"type": "function", "function": {"name": "lookup"}}],
+        execute_tool=execute_tool,
+    ) == "查询完成"
+
+    assert execute_tool.call_count == 4
+    messages = client.chat.completions.create.call_args_list[1].kwargs["messages"]
+    tool_results = [message for message in messages if message["role"] == "tool"]
+    assert len(tool_results) == 5
+    assert json.loads(tool_results[-1]["content"]) == {
+        "error": "工具调用总数超过4次"
+    }
+
+
+def test_general_chat_stops_if_model_ignores_final_tool_choice(
+    monkeypatch, memory_store
+) -> None:
+    client = build_client()
+    repeated_call = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(
+        content=None, tool_calls=[build_tool_call("call-loop", "lookup", "{}")],
+    ))])
+    client.chat.completions.create.side_effect = [repeated_call] * 4
+    monkeypatch.setattr(deepseek_api, "get_client", lambda: client)
+    execute_tool = Mock(return_value="ok")
+
+    result = deepseek_api.deepseek_general(
+        "循环查询", "c2c:user-a",
+        tool_definitions=[{"type": "function", "function": {"name": "lookup"}}],
+        execute_tool=execute_tool,
+    )
+
+    assert result == "工具调用次数过多，请缩小查询范围。"
+    assert client.chat.completions.create.call_count == 4
+    assert execute_tool.call_count == 3
+    assert client.chat.completions.create.call_args.kwargs["tool_choice"] == "none"
 
 
 def test_general_chat_memory_is_isolated_by_conversation(monkeypatch, memory_store) -> None:

@@ -4,7 +4,7 @@ set -euo pipefail
 usage() {
     cat <<'HELP'
 用法: bash manage.sh <命令>
-  init    安装 uv、同步生产依赖并部署 systemd 服务（需要 root）
+  init    使用已安装的 uv 同步生产依赖并部署 systemd 服务（需要 root）
   deploy  安装或更新 systemd 服务并重启（需要 root）
   start   前台启动机器人
   help    显示帮助
@@ -30,6 +30,10 @@ esac
 SCRIPT_PATH="$(readlink -f -- "${BASH_SOURCE[0]}")"
 PROJECT_DIR="$(dirname -- "${SCRIPT_PATH}")"
 SERVICE_NAME="dota.service"
+SERVICE_USER="dota"
+SERVICE_GROUP="dota"
+DATA_DIR="/var/lib/dota"
+SECRETS_FILE="/etc/dota/secrets"
 UNIT_TEMPLATE="${PROJECT_DIR}/res/${SERVICE_NAME}"
 UNIT_TARGET="/etc/systemd/system/${SERVICE_NAME}"
 
@@ -55,13 +59,8 @@ init() {
     # 安装完成后必须部署服务，先校验权限，避免留下半完成的初始化。
     require_root init
     if ! find_uv; then
-        UV_INSTALLER="$(mktemp)"
-        trap 'rm -f "${UV_INSTALLER}"' EXIT
-        curl -LsSf https://astral.sh/uv/install.sh -o "${UV_INSTALLER}"
-        sh "${UV_INSTALLER}"
-        rm -f "${UV_INSTALLER}"
-        export PATH="${HOME}/.local/bin:${PATH}"
-        find_uv
+        echo "uv 未安装。请先通过系统包管理器安装固定版本的 uv。" >&2
+        exit 1
     fi
     cd "${PROJECT_DIR}"
     "${UV_BIN}" sync --frozen --no-dev
@@ -80,7 +79,33 @@ deploy() {
         exit 1
     fi
 
-    RENDERED_UNIT="$(mktemp)"
+    # 服务账户不允许登录，只拥有运行数据；源码继续由部署账户管理。
+    if ! getent group "${SERVICE_GROUP}" >/dev/null; then
+        groupadd --system "${SERVICE_GROUP}"
+    fi
+    if ! getent passwd "${SERVICE_USER}" >/dev/null; then
+        useradd --system --gid "${SERVICE_GROUP}" --home-dir "${DATA_DIR}" \
+            --shell /usr/sbin/nologin "${SERVICE_USER}"
+    fi
+    install -d -m 0700 -o "${SERVICE_USER}" -g "${SERVICE_GROUP}" "${DATA_DIR}"
+    install -d -m 0750 -o root -g "${SERVICE_GROUP}" "$(dirname -- "${SECRETS_FILE}")"
+    if [[ ! -f "${SECRETS_FILE}" ]]; then
+        echo "找不到密钥文件: ${SECRETS_FILE}" >&2
+        echo "请按 README 创建后重新部署。" >&2
+        exit 1
+    fi
+    chown root:"${SERVICE_GROUP}" "${SECRETS_FILE}"
+    chmod 0640 "${SECRETS_FILE}"
+
+    # 在覆盖 unit 前确认服务账户能读取代码和执行虚拟环境。
+    if ! runuser -u "${SERVICE_USER}" -- test -r "${PROJECT_DIR}/main.py" \
+        || ! runuser -u "${SERVICE_USER}" -- test -x "${PROJECT_DIR}/.venv/bin/python"; then
+        echo "${SERVICE_USER} 无法访问项目目录，请把项目放在 /opt 等可遍历路径。" >&2
+        exit 1
+    fi
+
+    # systemd-analyze 从文件名识别 unit 类型，因此保留 .service 后缀。
+    RENDERED_UNIT="$(mktemp --suffix=.service)"
     trap 'rm -f "${RENDERED_UNIT}"' EXIT
 
     # 转义 sed 替换字符串中的特殊字符，支持路径包含空格、& 或反斜杠。
@@ -101,6 +126,9 @@ deploy() {
         echo "WorkingDirectory 不是绝对路径: ${RENDERED_WORKING_DIR}" >&2
         exit 1
     fi
+
+    # 先验证临时 unit，避免错误配置覆盖正在运行的服务。
+    systemd-analyze verify "${RENDERED_UNIT}"
 
     install -m 0644 "${RENDERED_UNIT}" "${UNIT_TARGET}"
     systemctl daemon-reload

@@ -8,7 +8,11 @@ from typing import Any
 import pytest
 import requests
 
-from lib.open_dota_client import OpenDotaApiClient, OpenDotaApiError
+from lib.open_dota_client import (
+    OpenDotaApiClient,
+    OpenDotaApiError,
+    _CachePersistenceError,
+)
 
 
 class FakeResponse:
@@ -288,6 +292,109 @@ def test_monthly_stats_reject_invalid_limits_and_rows() -> None:
         client._aggregate_monthly_stats([{"hero_id": 1, "games": 5, "wins": 6}])
 
 
+def test_cold_cache_stops_after_first_refresh_error() -> None:
+    client = OpenDotaApiClient(cache_path=None, refresh_workers=1)
+    calls: list[date] = []
+
+    def fail(day: date) -> list[dict[str, Any]]:
+        calls.append(day)
+        raise OpenDotaApiError("查询失败")
+
+    client._fetch_daily_stats = fail  # type: ignore[method-assign]
+
+    with pytest.raises(OpenDotaApiError, match="查询失败"):
+        client.get_recent_month_win_rate_leaders()
+
+    assert len(calls) == 1
+
+
+def test_cache_write_failure_is_reported(tmp_path: Path) -> None:
+    cache_path = tmp_path / "cache-as-directory"
+    cache_path.mkdir()
+    client = OpenDotaApiClient(cache_path=cache_path)
+
+    with pytest.raises(OpenDotaApiError, match="写入 OpenDota 英雄日统计缓存失败"):
+        client._save_cache_document({"version": 2, "days": {}, "snapshot": None})
+
+
+def test_invalid_cached_day_is_refetched_or_falls_back_to_snapshot(
+    tmp_path: Path,
+) -> None:
+    fixed_now = datetime(2026, 8, 27, 12, tzinfo=timezone.utc)
+    cache_path = tmp_path / "hero_stats.json"
+    client = OpenDotaApiClient(cache_path=cache_path, now=lambda: fixed_now)
+    client._set_current_stats_period()
+    dates = client._target_dates()
+    rows = [{"hero_id": 1, "games": 10, "wins": 6}]
+    bad_day = dates[-1]
+    cache_path.write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "days": {
+                    **{day.isoformat(): rows for day in dates[:-1]},
+                    bad_day.isoformat(): [
+                        {"hero_id": 1, "games": 5, "wins": 6}
+                    ],
+                },
+                "snapshot": {
+                    "cached_at": fixed_now.timestamp(),
+                    "period_start": dates[0].isoformat(),
+                    "period_end": dates[-1].isoformat(),
+                    "data": [{"hero_id": 1, "games": 300, "wins": 180}],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    calls: list[date] = []
+
+    def fail(day: date) -> list[dict[str, Any]]:
+        calls.append(day)
+        raise OpenDotaApiError("查询失败")
+
+    client._fetch_daily_stats = fail  # type: ignore[method-assign]
+
+    stats = client.get_recent_month_win_rate_leaders(min_games=1)
+
+    assert calls == [bad_day]
+    assert stats[0].games == 300
+    assert client.used_cached_hero_stats is True
+
+
+def test_daily_checkpoint_write_failure_is_not_hidden_by_snapshot(tmp_path: Path) -> None:
+    fixed_now = datetime(2026, 8, 27, 12, tzinfo=timezone.utc)
+    cache_path = tmp_path / "hero_stats.json"
+    client = OpenDotaApiClient(cache_path=cache_path, now=lambda: fixed_now)
+    client._set_current_stats_period()
+    dates = client._target_dates()
+    rows = [{"hero_id": 1, "games": 10, "wins": 6}]
+    cache_path.write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "days": {day.isoformat(): rows for day in dates[:-1]},
+                "snapshot": {
+                    "cached_at": fixed_now.timestamp(),
+                    "period_start": dates[0].isoformat(),
+                    "period_end": dates[-1].isoformat(),
+                    "data": [{"hero_id": 1, "games": 300, "wins": 180}],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    client._fetch_daily_stats = lambda _day: rows  # type: ignore[method-assign]
+
+    def fail_save(_document: dict[str, Any]) -> None:
+        raise _CachePersistenceError("写入失败")
+
+    client._save_cache_document = fail_save  # type: ignore[method-assign]
+
+    with pytest.raises(OpenDotaApiError, match="写入失败"):
+        client.get_recent_month_win_rate_leaders(min_games=1)
+
+
 def test_get_retries_522_before_succeeding() -> None:
     session = FakeSession(
         [FakeResponse(522), FakeResponse(522), FakeResponse(200, {"ok": True})]
@@ -323,9 +430,17 @@ def test_get_reports_sanitized_api_error_without_full_url() -> None:
 
 
 def test_recent_matches_default_returns_five_ranked_games() -> None:
-    ranked = {"game_mode": 22, "hero_id": 1, "radiant_win": True, "player_slot": 0}
+    ranked = {
+        "lobby_type": 7,
+        "game_mode": 23,
+        "hero_id": 1,
+        "radiant_win": True,
+        "player_slot": 0,
+    }
     client = OpenDotaApiClient(
-        session=FakeSession([FakeResponse(200, [{"game_mode": 23}] + [ranked] * 6)]),
+        session=FakeSession(
+            [FakeResponse(200, [{"lobby_type": 0, "game_mode": 22}] + [ranked] * 6)]
+        ),
         max_retries=0,
         cache_path=None,
     )
@@ -335,7 +450,7 @@ def test_recent_matches_default_returns_five_ranked_games() -> None:
 def test_get_recent_matches_filters_non_ranked_and_limits() -> None:
     recent = [
         {
-            "game_mode": 22,
+            "lobby_type": 7,
             "radiant_win": True,
             "player_slot": 0,
             "hero_id": 1,
@@ -346,9 +461,9 @@ def test_get_recent_matches_filters_non_ranked_and_limits() -> None:
             "hero_healing": 0,
             "gold_per_min": 500,
         },
-        {"game_mode": 23, "hero_id": 2},  # 非天梯，应被过滤
+        {"lobby_type": 0, "hero_id": 2},  # 非天梯，应被过滤
         {
-            "game_mode": 22,
+            "lobby_type": 7,
             "radiant_win": False,
             "player_slot": 128,
             "hero_id": 3,
@@ -388,7 +503,7 @@ def test_get_recent_matches_returns_none_on_api_error() -> None:
 def test_get_matches_by_date_formats_detail_and_appends_end_marker() -> None:
     matches = [
         {
-            "game_mode": 22,
+            "lobby_type": 7,
             "match_id": 9,
             "radiant_win": True,
             "player_slot": 0,
@@ -396,26 +511,16 @@ def test_get_matches_by_date_formats_detail_and_appends_end_marker() -> None:
             "kills": 5,
             "deaths": 3,
             "assists": 2,
+            "duration": 3000,
+            "gold_per_min": 500,
+            "xp_per_min": 400,
+            "hero_damage": 900,
+            "tower_damage": 100,
+            "hero_healing": 0,
         }
     ]
-    detail = {
-        "duration": 3000,
-        "players": [
-            {
-                "account_id": 123,
-                "isRadiant": True,
-                "gold_per_min": 500,
-                "xp_per_min": 400,
-                "hero_damage": 900,
-                "tower_damage": 100,
-                "hero_healing": 0,
-                "total_gold": 10000,
-                "total_xp": 9000,
-            }
-        ],
-    }
     client = OpenDotaApiClient(
-        session=FakeSession([FakeResponse(200, matches), FakeResponse(200, detail)]),
+        session=FakeSession([FakeResponse(200, matches)]),
         max_retries=0,
         cache_path=None,
         hero_name_resolver=lambda hero_id: "敌法师" if hero_id == 1 else None,
@@ -426,16 +531,27 @@ def test_get_matches_by_date_formats_detail_and_appends_end_marker() -> None:
     assert "游戏胜利 英雄:敌法师 击杀:5 死亡:3 助攻:2" in result
     assert "持续时间3000秒" in result
     assert "此玩家数据结束" in result
+    assert client.session.calls == 1
 
 
 def test_get_matches_by_date_returns_empty_string_when_no_ranked_games() -> None:
     client = OpenDotaApiClient(
-        session=FakeSession([FakeResponse(200, [{"game_mode": 23}])]),
+        session=FakeSession([FakeResponse(200, [{"lobby_type": 0}])]),
         max_retries=0,
         cache_path=None,
     )
 
     assert client.get_matches_by_date(123, 1) == ""
+
+
+def test_get_matches_by_date_returns_none_on_api_error() -> None:
+    client = OpenDotaApiClient(
+        session=FakeSession([FakeResponse(522)]),
+        max_retries=0,
+        cache_path=None,
+    )
+
+    assert client.get_matches_by_date(123, 1) is None
 
 
 def test_get_heroes_returns_id_to_name_mapping() -> None:

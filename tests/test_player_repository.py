@@ -1,4 +1,8 @@
 import json
+import os
+from concurrent.futures import ThreadPoolExecutor
+
+import pytest
 
 from lib.player_repository import PlayerRepository
 
@@ -105,3 +109,36 @@ def test_bindings_preserves_first_duplicate_nickname(tmp_path) -> None:
 
     assert repository.bindings() == {"小明": repository.get("小明"), "小红": 789}
     assert repository.bindings()["小明"] == 123
+
+
+@pytest.mark.parametrize("content", ["{broken", '{"nick_name": "小明"}'])
+def test_invalid_file_is_rejected_without_overwrite(tmp_path, content) -> None:
+    path = tmp_path / "name_id.json"
+    path.write_text(content, encoding="utf-8")
+
+    with pytest.raises((json.JSONDecodeError, ValueError)):
+        PlayerRepository(path)
+
+    assert path.read_text(encoding="utf-8") == content
+
+
+def test_concurrent_updates_are_all_persisted(tmp_path) -> None:
+    path = tmp_path / "name_id.json"
+    repository = PlayerRepository(path)
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        list(executor.map(lambda index: repository.set(f"player-{index}", index), range(40)))
+
+    assert PlayerRepository(path).bindings() == {
+        f"player-{index}": index for index in range(40)
+    }
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX permissions only")
+def test_storage_permissions_are_private(tmp_path) -> None:
+    parent = tmp_path / "players"
+    path = parent / "name_id.json"
+    PlayerRepository(path).set("小明", 123)
+
+    assert parent.stat().st_mode & 0o777 == 0o700
+    assert path.stat().st_mode & 0o777 == 0o600

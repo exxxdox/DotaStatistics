@@ -1,11 +1,18 @@
 [Unit] 
 Description=dota qqbot
 [Service]
-EnvironmentFile=/root/.secrets
+User=dota
+Group=dota
+EnvironmentFile=/etc/dota/secrets
+Environment=DATA_DIR=/var/lib/dota
 # WorkingDirectory 不是 shell 命令，双引号会被视为路径内容而导致绝对路径校验失败。
 WorkingDirectory=__PROJECT_DIR__
 # 生产服务直接使用 uv 同步出的 .venv，重启时不再触发依赖解析。
 ExecStart="__PROJECT_DIR__/.venv/bin/python" main.py
 Restart=on-failure
+NoNewPrivileges=true
+PrivateTmp=true
+# 聊天记录和选手绑定默认只允许服务账户读取。
+UMask=0077
 [Install] 
 WantedBy=multi-user.target

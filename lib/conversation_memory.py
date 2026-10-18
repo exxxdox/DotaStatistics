@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import os
 import sqlite3
 import tempfile
 import zlib
@@ -23,8 +24,17 @@ class ConversationMemory:
             raise ValueError("Conversation limits must be at least 16384 bytes")
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
+        self._secure_permissions(self.root, 0o700)
+        for database in self.root.glob("*.sqlite3"):
+            if database.is_file() and not database.is_symlink():
+                self._secure_permissions(database, 0o600)
         self.user_limit_bytes = user_limit_bytes
         self.group_limit_bytes = group_limit_bytes
+
+    @staticmethod
+    def _secure_permissions(path: Path, mode: int) -> None:
+        if os.name == "posix":
+            path.chmod(mode)
 
     def _location(self, conversation_id: str) -> tuple[Path, int]:
         kind, separator, identity = conversation_id.partition(":")
@@ -36,6 +46,14 @@ class ConversationMemory:
 
     @staticmethod
     def _connect(path: Path, limit: int) -> sqlite3.Connection:
+        if os.name == "posix":
+            try:
+                descriptor = os.open(path, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
+            except FileExistsError:
+                pass
+            else:
+                os.close(descriptor)
+            ConversationMemory._secure_permissions(path, 0o600)
         connection = sqlite3.connect(path, timeout=30, isolation_level=None)
         try:
             # DELETE journal and FULL vacuum avoid an indefinitely growing WAL or free pages.

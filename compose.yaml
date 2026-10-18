@@ -13,6 +13,10 @@ services:
       # 只把运行时 JSON 写入持久目录，避免覆盖镜像内的英雄名称静态资源。
       DATA_DIR: /data
     volumes:
-      # 绑定宿主机目录，让备份、查看和迁移运行数据更直接。
-      - ./data:/data
+      # 禁止 Compose 以 root 自动创建目录；README 的初始化命令负责正确权限。
+      - type: bind
+        source: ./data
+        target: /data
+        bind:
+          create_host_path: false
 networks: {}

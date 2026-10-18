@@ -1,5 +1,6 @@
 import hashlib
 import json
+import os
 import random
 import sqlite3
 import string
@@ -196,3 +197,18 @@ def test_clear_is_persistent_isolated_and_keeps_ids_increasing(tmp_path) -> None
     restarted.clear("c2c:missing")
     with pytest.raises(ValueError):
         restarted.clear("default")
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX permissions only")
+def test_storage_permissions_are_private_and_existing_database_is_repaired(tmp_path) -> None:
+    tmp_path.chmod(0o755)
+    path = tmp_path / "existing.sqlite3"
+    path.touch(mode=0o644)
+
+    store = ConversationMemory(tmp_path)
+    store.append("c2c:alice", "user", "secret")
+
+    assert tmp_path.stat().st_mode & 0o777 == 0o700
+    assert path.stat().st_mode & 0o777 == 0o600
+    created = next(item for item in tmp_path.glob("*.sqlite3") if item != path)
+    assert created.stat().st_mode & 0o777 == 0o600

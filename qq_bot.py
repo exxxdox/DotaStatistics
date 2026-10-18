@@ -3,6 +3,7 @@
 import asyncio
 import os
 from datetime import date, datetime, timezone
+from weakref import WeakValueDictionary
 
 import botpy
 from botpy.message import C2CMessage, GroupMessage
@@ -52,6 +53,8 @@ class MyClient(botpy.Client):
         self._hero_report_completed_at = 0.0
         self._hero_report_day: date | None = None
         self._command_discovery_configured = False
+        # 弱引用避免访问过的会话永久累积，同时让同会话状态变更保持顺序。
+        self._message_locks: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()
 
     async def on_ready(self) -> None:
         _log.info(f"robot 「{self.robot.name}」 on_ready!")
@@ -80,6 +83,23 @@ class MyClient(botpy.Client):
         await self._handle_message(message, f"c2c:{user_openid or ''}", user_openid)
 
     async def _handle_message(
+        self,
+        message: GroupMessage | C2CMessage,
+        conversation_id: str,
+        speaker_id: str | None,
+        *,
+        is_group: bool = False,
+    ) -> None:
+        lock = self._message_locks.get(conversation_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._message_locks[conversation_id] = lock
+        async with lock:
+            await self._handle_message_locked(
+                message, conversation_id, speaker_id, is_group=is_group
+            )
+
+    async def _handle_message_locked(
         self,
         message: GroupMessage | C2CMessage,
         conversation_id: str,

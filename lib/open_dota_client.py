@@ -4,9 +4,10 @@ import os
 import threading
 import time
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
+from itertools import islice
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +30,10 @@ def _utc_now() -> datetime:
 
 class OpenDotaApiError(RuntimeError):
     """OpenDota 请求或响应不符合预期。"""
+
+
+class _CachePersistenceError(OpenDotaApiError):
+    """英雄统计缓存无法安全持久化。"""
 
 
 @dataclass(frozen=True)
@@ -140,7 +145,7 @@ class OpenDotaApiClient:
         result = "\n"
         size = 0
         for game in payload:
-            if game.get("game_mode") != 22:
+            if game.get("lobby_type") != 7:
                 continue
             radiant_win = game.get("radiant_win")
             player_slot = game.get("player_slot")
@@ -188,20 +193,19 @@ class OpenDotaApiClient:
                 )
         return result
 
-    def get_matches_by_date(self, account_id: int, date: int) -> str:
-        """格式化指定日期的天梯比赛列表；无数据时返回空串。"""
+    def get_matches_by_date(self, account_id: int, date: int) -> str | None:
+        """格式化指定日期的天梯比赛列表；上游异常时返回 None。"""
         try:
             payload = self._get(
                 f"/players/{account_id}/matches", params={"date": date}
             )
         except OpenDotaApiError:
             _log.warning("查询玩家比赛失败: account_id=%s", account_id)
-            return ""
+            return None
         result = ""
         for game in payload:
-            if game.get("game_mode") != 22:
+            if game.get("lobby_type") != 7:
                 continue
-            match_id = game.get("match_id")
             radiant_win = game.get("radiant_win")
             player_slot = game.get("player_slot")
             mr_lin = "游戏" + ("胜利" if whetherWin(radiant_win, player_slot) else "失败")
@@ -209,10 +213,20 @@ class OpenDotaApiClient:
             deaths = game.get("deaths")
             kills = game.get("kills")
             assists = game.get("assists")
+            duration = game.get("duration")
+            side = (
+                "天辉"
+                if isinstance(player_slot, int) and player_slot < 128
+                else "夜魇"
+            )
             result += (
                 f"{mr_lin} 英雄:{self._hero_name(hero_id)} "
                 f"击杀:{kills} 死亡:{deaths} 助攻:{assists} "
-                f"{self.get_match_detail(match_id, account_id)}\n"
+                f"持续时间{duration}秒 {side} "
+                f"gpm {game.get('gold_per_min')} xpm {game.get('xp_per_min')} "
+                f"对英雄伤害{game.get('hero_damage')} "
+                f"对英雄治疗{game.get('hero_healing')} "
+                f"建筑伤害{game.get('tower_damage')}\n"
             )
         if not result:
             return ""
@@ -250,7 +264,9 @@ class OpenDotaApiClient:
         refresh_error = self._fetch_missing_days(missing_dates, save_day)
 
         if refresh_error is not None:
-            self._save_cache_document(document)
+            # 权限或磁盘错误不能伪装成上游故障，否则每次查询都会重新消耗配额。
+            if isinstance(refresh_error, _CachePersistenceError):
+                raise refresh_error
             snapshot = self._load_recent_snapshot(document)
             if snapshot is None:
                 raise refresh_error
@@ -306,24 +322,35 @@ class OpenDotaApiClient:
         if not missing_dates:
             return None
 
-        first_error: OpenDotaApiError | None = None
         worker_count = min(self.refresh_workers, len(missing_dates))
         with ThreadPoolExecutor(max_workers=worker_count) as executor:
-            futures = {
+            pending_dates = iter(missing_dates)
+            futures: dict[Future[list[dict[str, Any]]], date] = {
                 executor.submit(self._fetch_daily_stats, day): day
-                for day in missing_dates
+                for day in islice(pending_dates, worker_count)
             }
-            for future in as_completed(futures):
-                day = futures[future]
-                try:
-                    rows = future.result()
-                    # 保存前先完整校验，禁止坏数据污染增量缓存。
-                    self._aggregate_monthly_stats(rows)
-                    # 消费线程串行写缓存，不再重复累计调用方不会使用的日数据。
-                    on_day(day, rows)
-                except OpenDotaApiError as error:
-                    first_error = first_error or error
-        return first_error
+            while futures:
+                done, _ = wait(futures, return_when=FIRST_COMPLETED)
+                for future in sorted(done, key=lambda item: futures[item]):
+                    day = futures.pop(future)
+                    try:
+                        rows = future.result()
+                        # 保存前先完整校验，禁止坏数据污染增量缓存。
+                        self._aggregate_monthly_stats(rows)
+                        # 消费线程串行写缓存，不再重复累计调用方不会使用的日数据。
+                        on_day(day, rows)
+                    except OpenDotaApiError as error:
+                        # 上游或增量落盘失败后不再发起其余日期请求。
+                        for pending in futures:
+                            pending.cancel()
+                        return error
+
+                    next_day = next(pending_dates, None)
+                    if next_day is not None:
+                        futures[executor.submit(self._fetch_daily_stats, next_day)] = (
+                            next_day
+                        )
+        return None
 
     def _fetch_daily_stats(self, target_date: date) -> list[dict[str, Any]]:
         start = datetime(
@@ -449,8 +476,8 @@ GROUP BY hero_id
             )
             # 同一文件系统原子替换，避免服务中断留下半份 JSON。
             temporary_path.replace(self.cache_path)
-        except OSError:
-            _log.exception("写入 OpenDota 英雄日统计缓存失败")
+        except OSError as error:
+            raise _CachePersistenceError("写入 OpenDota 英雄日统计缓存失败") from error
 
     def _load_cache_document(self) -> dict[str, Any]:
         if self.cache_path is None:
@@ -463,7 +490,21 @@ GROUP BY hero_id
                 or not isinstance(cached.get("days"), dict)
             ):
                 raise ValueError("缓存版本或结构不匹配")
-            return cached
+            valid_days: dict[str, list[dict[str, Any]]] = {}
+            for day, rows in cached["days"].items():
+                if not isinstance(day, str) or not isinstance(rows, list):
+                    continue
+                try:
+                    self._aggregate_monthly_stats(rows)
+                except OpenDotaApiError:
+                    # 单日损坏只使该日重新抓取，完整快照仍可用于故障回退。
+                    continue
+                valid_days[day] = rows
+            return {
+                "version": CACHE_SCHEMA_VERSION,
+                "days": valid_days,
+                "snapshot": cached.get("snapshot"),
+            }
         except (OSError, TypeError, ValueError):
             # 旧版月度快照口径不同，不能混入新的逐日 public_matches 数据。
             return {"version": CACHE_SCHEMA_VERSION, "days": {}, "snapshot": None}

@@ -102,6 +102,52 @@ def build_router(**overrides) -> CommandRouter:
     return CommandRouter(BotServices(**defaults), memory_store=qq_bot.test_memory_store)
 
 
+def test_same_conversation_messages_are_processed_in_order(memory_store) -> None:
+    started = Event()
+    release = Event()
+    calls: list[str] = []
+
+    def dispatch(content, _context):
+        calls.append(content)
+        if content == "第一条":
+            started.set()
+            assert release.wait(3)
+        return f"回复:{content}"
+
+    class Message:
+        group_openid = None
+
+        def __init__(self, content):
+            self.content = content
+
+        async def reply(self, **_kwargs):
+            return SimpleNamespace(id="reply-id")
+
+    async def run() -> None:
+        bot = MyClient(
+            router=SimpleNamespace(dispatch=dispatch),
+            intents=botpy.Intents(public_messages=True),
+            ext_handlers=False,
+        )
+        first = asyncio.create_task(
+            bot._handle_message(Message("第一条"), "c2c:alice", "alice")
+        )
+        assert await asyncio.to_thread(started.wait, 1)
+        second = asyncio.create_task(
+            bot._handle_message(Message("第二条"), "c2c:alice", "alice")
+        )
+        await asyncio.sleep(0.02)
+        assert calls == ["第一条"]
+        release.set()
+        await asyncio.gather(first, second)
+
+    asyncio.run(run())
+
+    assert [record["content"] for record in memory_store.read("c2c:alice")] == [
+        "第一条", "回复:第一条", "第二条", "回复:第二条",
+    ]
+
+
 def test_empty_message_returns_help() -> None:
     assert "指令列表" in build_router().dispatch("   ")
 

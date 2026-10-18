@@ -4,10 +4,43 @@ QQ Dota 2 机器人，支持选手追踪、近期战绩、每日简报、英雄�
 
 ## Docker 启动
 
-在项目目录中执行：
+复制环境配置，填写三个必填凭据，再创建仅机器人账户可写的数据目录：
 
 ```bash
+cp .env.example .env
+${EDITOR:-vi} .env
+sudo install -d -m 0750 -o 10001 -g 10001 data
 docker compose up -d --build
+```
+
+Compose 不会自动创建 `data`，避免新 Linux 主机把目录建成机器人无法写入的 root 目录。
+
+## systemd 启动
+
+先安装固定版本的 `uv`，并把项目放在 `dota` 用户可读取的路径，例如 `/opt/DotaStatistics`。创建密钥文件：
+
+```bash
+sudo install -d -m 0700 -o root -g root /etc/dota
+sudo install -m 0600 -o root -g root .env /etc/dota/secrets
+sudo bash manage.sh init
+```
+
+`init` 会创建 `dota` 账户，再把密钥改为 `root:dota`、`0640`。它不会以 root 下载或执行远程安装脚本。运行数据保存在 `/var/lib/dota`。
+
+## Tag 发布
+
+推送 Git tag 会自动构建 `linux/amd64` Docker 镜像，并在同名 GitHub Release 中上传 ZIP：
+
+```bash
+git tag v1.0.0
+git push origin v1.0.0
+```
+
+下载并解压 Release 中的 ZIP，然后导入镜像：
+
+```bash
+unzip dotastatistics-v1.0.0-linux-amd64-docker-image.zip
+docker load --input dotastatistics-v1.0.0-linux-amd64-docker-image.tar
 ```
 
 ## 怎么用
@@ -22,7 +55,7 @@ docker compose up -d --build
 | 英雄胜率 | `高胜率英雄` | 最近 30 天全分段英雄胜率 Top 10，不使用 AI 分析 |
 | 查看群标识 | `查看当前群OpenID` 或 `群OpenID` | 当前群的 OpenID，仅群聊可用 |
 | 清空对话 | `/clear` | 清空当前私聊或当前群的对话记录及未完成参数填写，保留选手绑定 |
-| AI 聊天 | `目前记录了哪些 Dota 用户？` | 查看已记录选手及 Dota ID，也可以直接闲聊 |
+| AI Agent | `查下小明最近三场战绩` | 对话中查询已绑定选手、近期战绩或今日比赛，也可以直接闲聊 |
 
 查询选手前，先用 `追踪术` 绑定昵称和 Dota ID。昵称不能含空格，最多 256 个字符；Dota ID 必须是正整数。再次绑定同一昵称可更新对应的 Dota ID。
 
@@ -51,10 +84,6 @@ docker compose up -d --build
 - 私聊用户之间、不同群之间的聊天记录独立；同一群共用群内对话历史。
 - AI 每次只参考最近一部分对话，不保证记起所有旧消息。
 - 已绑定的选手资料长期保留，不随聊天记录淘汰。追踪名单在机器人内共用，可询问“目前记录了哪些 Dota 用户？”查看。
+- AI 只可调用固定的只读查询工具，不能在对话中新增或修改选手绑定。
 
 机器人只能保存它实际收到的消息，无法记录未收到的群消息。
-
-## data目录映射
-
-可能需要
-`sudo chown -R 10001:10001 ./data`
