@@ -29,17 +29,16 @@ sudo bash manage.sh init
 
 ## Tag 发布
 
-推送 Git tag 会自动构建 `linux/amd64` Docker 镜像，并在同名 GitHub Release 中上传 ZIP：
+推送 Git tag 会自动构建 `linux/amd64` Docker 镜像，并在同名 GitHub Release 中上传 TAR：
 
 ```bash
 git tag v1.0.0
 git push origin v1.0.0
 ```
 
-下载并解压 Release 中的 ZIP，然后导入镜像：
+下载 Release 中的 TAR，然后直接导入镜像：
 
 ```bash
-unzip dotastatistics-v1.0.0-linux-amd64-docker-image.zip
 docker load --input dotastatistics-v1.0.0-linux-amd64-docker-image.tar
 ```
 

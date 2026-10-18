@@ -34,14 +34,11 @@ jobs:
           fi
 
           image_ref="dota:${safe_tag}"
-          archive="${project_name}-${safe_tag}-linux-amd64-docker-image.zip"
-          image_tar="${project_name}-${safe_tag}-linux-amd64-docker-image.tar"
+          archive="${project_name}-${safe_tag}-linux-amd64-docker-image.tar"
 
           docker build --platform linux/amd64 --tag "$image_ref" .
           docker image inspect "$image_ref" >/dev/null
-          docker save --output "$image_tar" "$image_ref"
-          zip -9 "$archive" "$image_tar"
-          rm "$image_tar"
+          docker save --output "$archive" "$image_ref"
 
           echo "archive=$archive" >>"$GITHUB_OUTPUT"
 
