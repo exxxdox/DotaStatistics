@@ -4,7 +4,7 @@ QQ Dota 2 机器人，支持选手追踪、近期战绩、每日简报、英雄�
 
 ## Docker 启动
 
-复制环境配置并填写三个必填凭据。Compose 会把项目内的 `data` 目录映射到容器 `/data`：
+复制环境配置并填写三个必填凭据。Compose 会创建 `dota-data` named volume 并挂载到容器 `/data`：
 
 ```bash
 cp .env.example .env
@@ -12,15 +12,28 @@ ${EDITOR:-vi} .env
 docker compose up -d --build
 ```
 
-容器入口会以 root 创建或修正 Linux 目录权限，随后立即降权到 UID/GID `10001:10001` 运行机器人。Docker Desktop 的 Windows 映射目录不支持可靠的 `chmod/chown`，入口会先验证非 root 用户可读写，再交给 Windows ACL 管理权限。
+镜像入口会检查 `/data`。只有目录不可访问或导入文件不属于 UID/GID `10001:10001` 时，入口才会自动修正所有权；随后立即降权运行机器人。`docker compose down` 会保留数据；不要使用 `docker compose down -v`，它会删除 volume。
 
 Windows PowerShell 可直接运行：
 
 ```powershell
 Copy-Item .env.example .env
-New-Item -ItemType Directory -Force .\data
 docker compose up -d --build
 ```
+
+## 导入数据
+
+导入必须在机器人停止时执行，避免复制中的 SQLite 数据被同时读写。启动时会自动识别 `docker compose cp` 创建的 root 文件并修正权限：
+
+```powershell
+docker compose down
+docker compose build
+docker compose create dota
+docker compose cp ./data/. dota:/data
+docker compose up -d
+```
+
+无需手动执行 `chown`。修权完成后，Python 进程仍以 UID/GID `10001:10001` 运行。
 
 ## systemd 启动
 

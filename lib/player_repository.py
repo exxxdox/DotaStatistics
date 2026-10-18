@@ -7,8 +7,6 @@ import threading
 from pathlib import Path
 from typing import Any
 
-from lib.file_permissions import secure_permissions
-
 
 class PlayerRepository:
     """保存并查询昵称到 Dota ID 的映射，读写持久的 JSON 文件。"""
@@ -21,7 +19,8 @@ class PlayerRepository:
 
     @staticmethod
     def _secure_permissions(path: Path, mode: int) -> None:
-        secure_permissions(path, mode)
+        if os.name == "posix":
+            path.chmod(mode)
 
     def _load(self) -> None:
         if not self.file_path.exists():

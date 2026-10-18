@@ -26,7 +26,7 @@ ENV DATA_DIR=/data \
 
 WORKDIR /app
 
-# 固定 UID/GID 便于持久卷保留明确的文件所有权，并避免以 root 运行机器人。
+# 固定 UID/GID 便于持久卷保留明确的文件所有权；root 只用于入口修权。
 RUN apk add --no-cache su-exec \
     && addgroup -g 10001 -S bot \
     && adduser -u 10001 -G bot -S -D -H bot \
@@ -41,7 +41,7 @@ COPY --chown=bot:bot service ./service
 COPY --chown=bot:bot res/hero_name.json ./res/hero_name.json
 COPY --chmod=0755 docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 
-# 入口仅用 root 修正 Linux bind mount，随后立即降权到 bot。
+# 入口只在导入数据所有权不匹配时修复，随后立即降权到 bot。
 ENTRYPOINT ["docker-entrypoint.sh"]
 
 # QQ WebSocket 是主动出站连接，因此镜像不声明或监听入站端口。
