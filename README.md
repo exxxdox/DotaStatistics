@@ -43,6 +43,8 @@ unzip dotastatistics-v1.0.0-linux-amd64-docker-image.zip
 docker load --input dotastatistics-v1.0.0-linux-amd64-docker-image.tar
 ```
 
+导入后的镜像名称为 `dota:v1.0.0`。
+
 ## 怎么用
 
 群聊中先 **@机器人**，再发送命令；私聊直接发送即可。也可以点击机器人菜单中的命令。

@@ -33,7 +33,7 @@ jobs:
             safe_tag="${GITHUB_SHA:0:12}"
           fi
 
-          image_ref="${project_name}:release-${safe_tag}"
+          image_ref="dota:${safe_tag}"
           archive="${project_name}-${safe_tag}-linux-amd64-docker-image.zip"
           image_tar="${project_name}-${safe_tag}-linux-amd64-docker-image.tar"
 
