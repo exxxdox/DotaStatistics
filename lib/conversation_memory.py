@@ -107,8 +107,14 @@ class ConversationMemory:
         connection = sqlite3.connect(path, timeout=30, isolation_level=None)
         try:
             # DELETE journal and FULL vacuum avoid an indefinitely growing WAL or free pages.
+            previous_vacuum = connection.execute("PRAGMA auto_vacuum").fetchone()[0]
+            previous_page_size = connection.execute("PRAGMA page_size").fetchone()[0]
+            connection.execute("PRAGMA journal_mode = DELETE")
             connection.execute("PRAGMA page_size = 4096")
             connection.execute("PRAGMA auto_vacuum = FULL")
+            if previous_vacuum != 1 or previous_page_size != 4096:
+                # 已有表不能仅靠 PRAGMA 转为 FULL；先回收空页并统一页大小，禁止误删有效历史。
+                connection.execute("VACUUM")
             connection.execute(
                 "CREATE TABLE IF NOT EXISTS messages "
                 "(id INTEGER PRIMARY KEY AUTOINCREMENT, payload BLOB NOT NULL)"
@@ -252,8 +258,10 @@ class ConversationMemory:
                     state = json.loads(zlib.decompress(row[0]).decode("utf-8"))
                     self._validate_pending(state)
                     return state[0], state[1]
-                except (zlib.error, UnicodeError, ValueError, TypeError) as error:
-                    raise ValueError("Corrupt compressed pending state") from error
+                except (zlib.error, UnicodeError, ValueError, TypeError):
+                    # 损坏的追问只属于当前成员，不能阻断新命令或迫使用户清空正常历史。
+                    connection.execute("DELETE FROM pending WHERE speaker = ?", (speaker,))
+                    return None
 
     def set_pending(
         self, conversation_id: str, speaker_id: str,

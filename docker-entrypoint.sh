@@ -25,7 +25,20 @@ print(os.path.realpath(sys.argv[1]))
             ;;
     esac
 
+    # 只记录尚不存在的路径段，避免嵌套目录的 root:0700 父目录阻断 bot 遍历。
+    existing_parent="$data_dir"
+    while [ ! -d "$existing_parent" ] && [ "$existing_parent" != "$data_root" ]; do
+        existing_parent="${existing_parent%/*}"
+    done
     mkdir -p "$data_dir"
+    if [ "$existing_parent" != "$data_dir" ]; then
+        created_parent="${data_dir%/*}"
+        while [ "$created_parent" != "$existing_parent" ] && [ "$created_parent" != "$data_root" ]; do
+            chown -h bot:bot "$created_parent"
+            chmod 700 "$created_parent"
+            created_parent="${created_parent%/*}"
+        done
+    fi
 
     needs_repair=0
     if ! su-exec bot test -r "$data_dir" \

@@ -1,6 +1,7 @@
 """QQ SDK 适配层：处理事件、异步调用与当前会话回复。"""
 
 import asyncio
+import logging
 import os
 from datetime import date, datetime, timezone
 from weakref import WeakValueDictionary
@@ -10,6 +11,7 @@ from botpy.message import C2CMessage, GroupMessage
 
 from data_center import _log
 from lib.conversation_memory import ConversationMemory
+from lib.qq_sdk_security import configure_qq_sdk_security
 # 保留旧模块的公开导入路径，避免部署扩展和已有调用方随职责拆分失效。
 from bootstrap import build_application
 from service.command_router import (
@@ -39,6 +41,9 @@ class MyClient(botpy.Client):
         memory_store: ConversationMemory,
         **kwargs,
     ) -> None:
+        configure_qq_sdk_security()
+        # SDK DEBUG includes authorization headers and message bodies, including with --debug.
+        kwargs["log_level"] = logging.INFO
         super().__init__(*args, **kwargs)
         self.router = router
         # 依赖由启动入口装配，不再修改路由或隐式创建另一个统计客户端。

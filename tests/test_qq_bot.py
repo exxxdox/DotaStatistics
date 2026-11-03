@@ -838,3 +838,33 @@ def test_failed_refresh_keeps_cached_report_during_cooldown() -> None:
         assert len(calls) == 1
 
     asyncio.run(run())
+
+
+def test_client_disables_sensitive_sdk_debug_logs(monkeypatch, caplog) -> None:
+    import logging
+    import sys
+
+    import ssl
+    import botpy.gateway
+    import botpy.http
+
+    monkeypatch.setattr(botpy.http, "SSLContext", ssl.SSLContext)
+    monkeypatch.setattr(botpy.gateway, "SSLContext", ssl.SSLContext)
+    monkeypatch.setattr(sys, "argv", ["main.py", "--debug"])
+    caplog.set_level(logging.DEBUG, logger="botpy")
+
+    async def run():
+        MyClient(router=build_router(), intents=botpy.Intents(public_messages=True),
+                 ext_handlers=False, log_level=logging.DEBUG)
+        logger = logging.getLogger("botpy")
+        logger.debug("Authorization: synthetic-private-token; private-message")
+        logger.info("safe status")
+
+    asyncio.run(run())
+    assert "synthetic-private-token" not in caplog.text
+    assert "private-message" not in caplog.text
+    assert "safe status" in caplog.text
+    for factory in (botpy.http.SSLContext, botpy.gateway.SSLContext):
+        context = factory()
+        assert context.verify_mode == ssl.CERT_REQUIRED
+        assert context.check_hostname is True

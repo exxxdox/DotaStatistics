@@ -344,3 +344,120 @@ def test_storage_permissions_are_private_and_existing_database_is_repaired(tmp_p
     assert path.stat().st_mode & 0o777 == 0o600
     created = next(item for item in tmp_path.glob("*.sqlite3") if item != path)
     assert created.stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.parametrize("auto_vacuum", [0, 2])
+@pytest.mark.parametrize("page_size", [4096, 8192])
+def test_legacy_database_migrates_before_evicting_valid_history(tmp_path, auto_vacuum, page_size):
+    store = ConversationMemory(tmp_path, user_limit_bytes=32768)
+    path, _ = store._location("c2c:legacy")
+    with sqlite3.connect(path) as connection:
+        connection.execute(f"PRAGMA page_size = {page_size}")
+        connection.execute(f"PRAGMA auto_vacuum = {auto_vacuum}")
+        connection.execute("CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, payload BLOB NOT NULL)")
+        connection.executemany("INSERT INTO messages(payload) VALUES (?)", [(b"x" * 6000,)] * 20)
+        connection.execute("DELETE FROM messages")
+        payload = zlib.compress(json.dumps({"role": "user", "content": "keep legacy history"}).encode())
+        connection.execute("INSERT INTO messages(payload) VALUES (?)", (payload,))
+    connection.close()
+    assert path.stat().st_size > 32768
+
+    assert store.read("c2c:legacy") == [{"role": "user", "content": "keep legacy history"}]
+    assert path.stat().st_size <= 32768
+    with sqlite3.connect(path) as connection:
+        assert connection.execute("PRAGMA auto_vacuum").fetchone()[0] == 1
+        assert connection.execute("PRAGMA page_size").fetchone()[0] == 4096
+    connection.close()
+    assert store.append("c2c:legacy", "assistant", "new history") > 20
+
+
+@pytest.mark.parametrize("payload", [b"broken", zlib.compress(b"{broken"), zlib.compress(b'["unknown", []]')])
+def test_corrupt_pending_removes_only_current_speaker_and_preserves_history(tmp_path, payload):
+    store = ConversationMemory(tmp_path)
+    store.append("group:room", "user", "keep history")
+    store.set_pending("group:room", "alice", ("撒情况", []))
+    store.set_pending("group:room", "bob", ("追踪术", ["bob"]))
+    path, _ = store._location("group:room")
+    with sqlite3.connect(path) as connection:
+        connection.execute("UPDATE pending SET payload=? WHERE speaker=?", (payload, store._speaker_key("alice")))
+    connection.close()
+
+    assert store.get_pending("group:room", "alice") is None
+    assert store.get_pending("group:room", "bob") == ("追踪术", ["bob"])
+    assert store.read("group:room") == [{"role": "user", "content": "keep history"}]
+    with sqlite3.connect(path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM pending").fetchone()[0] == 1
+    connection.close()
+
+
+def test_pending_database_errors_are_not_hidden(tmp_path):
+    store = ConversationMemory(tmp_path)
+    store.set_pending("group:room", "alice", ("撒情况", []))
+    path, _ = store._location("group:room")
+    with sqlite3.connect(path) as connection:
+        connection.execute("ALTER TABLE pending RENAME COLUMN payload TO broken")
+    connection.close()
+
+    with pytest.raises(sqlite3.OperationalError, match="payload"):
+        store.get_pending("group:room", "alice")
+
+
+
+@pytest.mark.parametrize("auto_vacuum", [0, 2])
+def test_legacy_database_evicts_oldest_and_keeps_recent_history_within_limit(tmp_path, auto_vacuum):
+    limit = 65536
+    store = ConversationMemory(tmp_path, user_limit_bytes=limit)
+    path, _ = store._location("c2c:legacy")
+    contents = [noise(800, index) for index in range(100)]
+    with sqlite3.connect(path) as connection:
+        connection.execute(f"PRAGMA auto_vacuum = {auto_vacuum}")
+        connection.execute(
+            "CREATE TABLE messages "
+            "(id INTEGER PRIMARY KEY AUTOINCREMENT, payload BLOB NOT NULL)"
+        )
+        connection.executemany(
+            "INSERT INTO messages(payload) VALUES (?)",
+            [(zlib.compress(json.dumps({"role": "user", "content": content}).encode()),)
+             for content in contents],
+        )
+    connection.close()
+    assert path.stat().st_size > limit
+
+    remaining = store.read("c2c:legacy", max_chars=200000, max_messages=100)
+
+    assert 0 < len(remaining) < len(contents)
+    assert [message["content"] for message in remaining] == contents[-len(remaining):]
+    assert path.stat().st_size <= limit
+    assert store.append("c2c:legacy", "assistant", "new history") > 100
+    assert path.stat().st_size <= limit
+
+
+def test_failed_legacy_vacuum_preserves_original_history(tmp_path, monkeypatch):
+    store = ConversationMemory(tmp_path)
+    path, _ = store._location("c2c:legacy")
+    payload = zlib.compress(json.dumps({"role": "user", "content": "keep history"}).encode())
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "CREATE TABLE messages "
+            "(id INTEGER PRIMARY KEY AUTOINCREMENT, payload BLOB NOT NULL)"
+        )
+        connection.execute("INSERT INTO messages(payload) VALUES (?)", (payload,))
+    connection.close()
+    original_connect = sqlite3.connect
+
+    class FailingVacuumConnection(sqlite3.Connection):
+        def execute(self, sql, parameters=()):
+            if sql == "VACUUM":
+                raise sqlite3.OperationalError("simulated migration failure")
+            return super().execute(sql, parameters)
+
+    monkeypatch.setattr(
+        sqlite3, "connect",
+        lambda *args, **kwargs: original_connect(*args, **kwargs, factory=FailingVacuumConnection),
+    )
+    with pytest.raises(sqlite3.OperationalError, match="simulated migration failure"):
+        store.read("c2c:legacy")
+
+    with original_connect(path) as connection:
+        assert connection.execute("SELECT payload FROM messages").fetchall() == [(payload,)]
+    connection.close()

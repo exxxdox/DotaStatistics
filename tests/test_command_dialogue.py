@@ -1,3 +1,4 @@
+import sqlite3
 from unittest.mock import Mock
 
 import pytest
@@ -180,3 +181,21 @@ def test_legacy_track_pending_cannot_bypass_operator_check(store) -> None:
 def test_empty_permanent_roster_guides_tracking(store) -> None:
     router = make_router(store, bindings=lambda: {})
     assert "尚未记录选手，请先使用：追踪术 昵称 dotaId" in router.dispatch("撒情况", PRIVATE_CONTEXT)
+
+
+@pytest.mark.parametrize("message,expected", [("取消", "AI:取消"), ("简报", "今日简报"), ("撒情况 小明", "比赛:123")])
+def test_corrupt_pending_does_not_block_cancel_or_new_command(store, message, expected):
+    context = CommandContext(conversation_id="group:room", speaker_id="alice")
+    router = make_router(store)
+    store.append("group:room", "user", "keep history")
+    store.set_pending("group:room", "alice", ("撒情况", []))
+    store.set_pending("group:room", "bob", ("撒情况", []))
+    path, _ = store._location("group:room")
+    with sqlite3.connect(path) as connection:
+        connection.execute("UPDATE pending SET payload=? WHERE speaker=?", (b"broken", store._speaker_key("alice")))
+    connection.close()
+
+    assert router.dispatch(message, context) == expected
+    assert store.get_pending("group:room", "alice") is None
+    assert store.get_pending("group:room", "bob") == ("撒情况", [])
+    assert store.read("group:room") == [{"role": "user", "content": "keep history"}]
