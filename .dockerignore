@@ -7,8 +7,17 @@
 .pytest_cache
 __pycache__
 *.py[cod]
+# Docker 默认模式不递归匹配，显式排除业务子目录中的旧字节码。
+**/__pycache__
+**/*.py[cod]
 *.log
 .env
+# 环境配置副本可能含凭据，仅放行无密钥的示例模板。
+.env.*
+!.env.example
+# 本地分发产物可能携带旧代码或数据，不能发送给构建器。
+dist
+*.tar
 data
 res/*.json
 !res/hero_name.json
