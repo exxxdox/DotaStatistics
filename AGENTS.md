@@ -2,6 +2,7 @@
 
 CLAUDE.md与AGENTS.md应保持一致
 不要终端输出暴露本地.env文件
+本项目的改动直接提交到main分支即可
 
 ## 数据来源api文档
 
