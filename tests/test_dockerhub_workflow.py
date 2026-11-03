@@ -62,13 +62,18 @@ docker() {
         capture_output=True, text=True, timeout=10,
     )
     commands = result.stdout.splitlines()
-    assert commands[0] == "tag dota:v1.2.3 exxxdox/pri:dota"
+    assert commands[0] == "tag dota:v1.2.3 exxxdox/dota-bot:latest"
     if failed_command != "tag":
         assert commands[1] == "login --username test-user --password-stdin"
     assert "test-token" not in result.stdout + result.stderr
     if failed_command:
         assert result.returncode != 0
-        assert "push exxxdox/pri:dota" not in commands
+        assert "push exxxdox/dota-bot:latest" not in commands
     else:
         assert result.returncode == 0, result.stderr
-        assert commands[-1] == "push exxxdox/pri:dota"
+        assert commands[-1] == "push exxxdox/dota-bot:latest"
+
+
+def test_compose_uses_published_dockerhub_image() -> None:
+    compose = (WORKFLOW.parents[2] / "compose.yaml").read_text(encoding="utf-8")
+    assert "    image: exxxdox/dota-bot:latest\n" in compose

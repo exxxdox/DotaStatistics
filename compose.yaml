@@ -2,7 +2,7 @@ services:
   dota:
     build:
       context: .
-    image: dota:local
+    image: exxxdox/dota-bot:latest
     restart: unless-stopped
     init: true
     stop_signal: SIGINT
