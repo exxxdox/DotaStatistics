@@ -49,7 +49,7 @@ def test_hero_report_reuses_pending_task_and_completed_result() -> None:
     asyncio.run(run())
 
 
-def test_hero_report_failure_allows_retry() -> None:
+def test_hero_report_failure_cools_down_before_retry() -> None:
     calls = []
 
     def build() -> str:
@@ -67,6 +67,9 @@ def test_hero_report_failure_allows_retry() -> None:
         )
         with pytest.raises(RuntimeError, match="refresh failed"):
             await bot._build_hero_report_with_deadline()
+        assert await bot._build_hero_report_with_deadline() == "英雄胜率更新失败，请稍后再次查询。"
+        assert len(calls) == 1
+        bot._hero_report_completed_at -= qq_bot.HERO_REPORT_CACHE_SECONDS
         assert await bot._build_hero_report_with_deadline() == "恢复后的榜单"
         assert len(calls) == 2
 
@@ -85,6 +88,9 @@ def MyClient(*args, **kwargs):
     # 测试显式装配替身，生产 SDK 不再隐式创建业务依赖。
     kwargs.setdefault("memory_store", qq_bot.test_memory_store)
     kwargs.setdefault("hero_win_rate_report", SimpleNamespace(build=lambda: "英雄榜"))
+    report = kwargs["hero_win_rate_report"]
+    if not hasattr(report, "build_cached"):
+        report.build_cached = lambda: None
     return SDKClient(*args, **kwargs)
 
 
@@ -722,3 +728,113 @@ def test_clear_invalid_arguments_preserve_history_and_pending(memory_store) -> N
     assert memory_store.read("c2c:alice")[0]["content"] == "保留记录"
     assert memory_store.get_pending("c2c:alice", "alice") == ("追踪术", [])
     assert router.dispatch("/clear") == "当前消息不包含有效会话标识。"
+
+
+def test_cached_report_returns_while_refresh_is_pending() -> None:
+    release = Event()
+
+    def build() -> str:
+        assert release.wait(3)
+        return "新榜单"
+
+    async def run() -> None:
+        bot = MyClient(
+            router=build_router(),
+            hero_win_rate_report=SimpleNamespace(
+                build=build, build_cached=lambda: "旧榜单及统计日期",
+            ),
+            intents=botpy.Intents(public_messages=True), ext_handlers=False,
+        )
+        try:
+            assert await asyncio.wait_for(bot._build_hero_report_with_deadline(), 0.5) == "旧榜单及统计日期"
+            assert not bot._hero_report_task.done()
+        finally:
+            release.set()
+            await bot._hero_report_task
+        assert await bot._build_hero_report_with_deadline() == "新榜单"
+
+    asyncio.run(run())
+
+
+def test_background_report_loop_prewarms_and_repeats(monkeypatch) -> None:
+    async def run() -> None:
+        bot = MyClient(router=build_router(), intents=botpy.Intents(public_messages=True), ext_handlers=False)
+        calls = []
+
+        async def refresh():
+            calls.append(True)
+            if len(calls) == 2:
+                raise asyncio.CancelledError
+
+        async def pause(seconds):
+            assert seconds == qq_bot.HERO_REPORT_CACHE_SECONDS
+
+        monkeypatch.setattr(bot, "_build_hero_report_with_deadline", refresh)
+        monkeypatch.setattr(qq_bot.asyncio, "sleep", pause)
+        with pytest.raises(asyncio.CancelledError):
+            await bot._refresh_hero_reports()
+        assert len(calls) == 2
+
+    asyncio.run(run())
+
+
+def test_on_ready_starts_only_one_refresh_loop(monkeypatch) -> None:
+    async def run() -> None:
+        configured = []
+
+        async def configure():
+            configured.append(True)
+
+        bot = MyClient(
+            router=build_router(), intents=botpy.Intents(public_messages=True),
+            ext_handlers=False, command_discovery=SimpleNamespace(configure=configure),
+        )
+        monkeypatch.setattr(type(bot), "robot", property(lambda self: SimpleNamespace(name="test")))
+        await bot.on_ready()
+        task = bot._hero_report_refresh_task
+        await bot.on_ready()
+        assert bot._hero_report_refresh_task is task
+        assert configured == [True]
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(run())
+
+
+def test_new_utc_day_refreshes_completed_report() -> None:
+    async def run() -> None:
+        calls = []
+        bot = MyClient(
+            router=build_router(),
+            hero_win_rate_report=SimpleNamespace(build=lambda: calls.append(True) or "榜单"),
+            intents=botpy.Intents(public_messages=True), ext_handlers=False,
+        )
+        assert await bot._build_hero_report_with_deadline() == "榜单"
+        bot._hero_report_day = bot._hero_report_day.replace(year=2020)
+        assert await bot._build_hero_report_with_deadline() == "榜单"
+        assert len(calls) == 2
+
+    asyncio.run(run())
+
+
+def test_failed_refresh_keeps_cached_report_during_cooldown() -> None:
+    async def run() -> None:
+        calls = []
+
+        def build():
+            calls.append(True)
+            raise RuntimeError("offline")
+
+        bot = MyClient(
+            router=build_router(),
+            hero_win_rate_report=SimpleNamespace(build=build, build_cached=lambda: "旧榜单"),
+            intents=botpy.Intents(public_messages=True), ext_handlers=False,
+        )
+        assert await bot._build_hero_report_with_deadline() == "旧榜单"
+        with pytest.raises(RuntimeError):
+            await bot._hero_report_task
+        assert await bot._build_hero_report_with_deadline() == "旧榜单"
+        assert len(calls) == 1
+
+    asyncio.run(run())

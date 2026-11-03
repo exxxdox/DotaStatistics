@@ -55,6 +55,43 @@ class FakeSession:
         return response
 
 
+@pytest.mark.parametrize("invalid", [None, "expired", "future", "rows", "period"])
+def test_cached_leaders_read_without_network_or_refresh_lock(tmp_path, invalid) -> None:
+    current = datetime(2026, 8, 27, tzinfo=timezone.utc)
+    session = FakeSession([])
+    client = OpenDotaApiClient(
+        session=session, cache_path=tmp_path / "stats.json", now=lambda: current,
+    )
+    snapshot = {
+        "cached_at": current.timestamp(),
+        "period_start": "2026-07-28", "period_end": "2026-08-26",
+        "data": [{"hero_id": 1, "games": 200, "wins": 120}],
+    }
+    if invalid == "expired":
+        snapshot["cached_at"] -= 48 * 60 * 60 + 1
+    elif invalid == "future":
+        snapshot["cached_at"] += 1
+    elif invalid == "rows":
+        snapshot["data"] = [{"hero_id": 1, "games": 1, "wins": 2}]
+    elif invalid == "period":
+        snapshot["period_start"] = "2026-08-26"
+    client._save_cache_document({"version": 2, "days": {}, "snapshot": snapshot})
+    client._cache_lock.acquire()
+    try:
+        result = client.get_cached_month_win_rate_leaders()
+    finally:
+        client._cache_lock.release()
+    assert session.calls == 0
+    assert client.stats_period_start is None
+    assert client.stats_period_end is None
+    if invalid:
+        assert result is None
+    else:
+        stats, start, end = result
+        assert stats[0].win_rate == 0.6
+        assert (start, end) == (date(2026, 7, 28), date(2026, 8, 26))
+
+
 @pytest.mark.parametrize("proxy", [None, "", "  ", "http://127.0.0.1:7890", "https://proxy.example:8443"])
 def test_opendota_proxy_environment(monkeypatch, proxy: str | None) -> None:
     if proxy is None:

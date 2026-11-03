@@ -1,4 +1,5 @@
 from collections.abc import Callable
+from datetime import date
 
 from lib.open_dota_client import HeroWinRateStat, OpenDotaApiClient
 
@@ -25,6 +26,24 @@ class HeroWinRateReportService:
 
         period_start = getattr(self.api_client, "stats_period_start", None)
         period_end = getattr(self.api_client, "stats_period_end", None)
+        return self._format(
+            stats, period_start, period_end,
+            cached=getattr(self.api_client, "used_cached_hero_stats", False),
+        )
+
+    def build_cached(self) -> str | None:
+        snapshot = self.api_client.get_cached_month_win_rate_leaders(
+            top_count=10, min_games=self.min_games,
+        )
+        if snapshot is None:
+            return None
+        stats, start, end = snapshot
+        return self._format(stats, start, end, cached=True)
+
+    def _format(
+        self, stats: list[HeroWinRateStat], period_start: date | None,
+        period_end: date | None, *, cached: bool,
+    ) -> str:
         period = (
             f"{period_start:%Y-%m-%d} 至 {period_end:%Y-%m-%d}"
             if period_start and period_end
@@ -35,8 +54,8 @@ class HeroWinRateReportService:
             f"统计：{period}（UTC完整自然日）；至少 {self.min_games} 场。",
             "口径：OpenDota public_matches 公开比赛样本。",
         ]
-        if getattr(self.api_client, "used_cached_hero_stats", False):
-            lines.append("提示：OpenDota 暂不可用，当前展示最近一次成功缓存。")
+        if cached:
+            lines.append("提示：当前展示最近一次成功缓存，统计日期见上方。")
         lines.extend(
             f"{index}.{self._hero_name(item)} {item.win_rate:.1%}（{item.games}场）"
             for index, item in enumerate(stats[:10], start=1)

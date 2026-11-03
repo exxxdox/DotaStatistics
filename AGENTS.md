@@ -14,6 +14,8 @@ https://docs.opendota.com
 
 Compose persists `/data` in a `dota-data` named volume. The entrypoint may run as root only to detect inaccessible or non-bot-owned imported data, repair it when needed, and immediately drop to UID/GID `10001:10001` before Python starts. Offline imports must stop the bot before copying data into the volume.
 
+Hero win-rate commands return a valid complete snapshot immediately while one shared background task refreshes missing UTC days. QQ readiness starts one periodic warm-up loop; refresh attempts and failures cool down for five minutes. Preserve the 48-hour snapshot age limit and display its actual statistics period. Cached report reads must not wait on the network refresh lock or mutate shared period metadata.
+
 AI tool view enums reuse the projection keys in `lib/open_dota_client.py`; keep fixed endpoint mappings and projection tests synchronized when adding views. Player `matches` returns bounded structured match IDs for follow-up analysis without changing legacy formatted reports. Global `teams` and `leagues` return partial upstream lists, not name search results.
 
 ## Build, Test, and Development Commands

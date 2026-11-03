@@ -206,6 +206,31 @@ class OpenDotaApiClient:
         eligible.sort(key=lambda stat: (-stat.win_rate, -stat.games, stat.hero_id))
         return eligible[:top_count]
 
+    def get_cached_month_win_rate_leaders(
+        self, top_count: int = 10, min_games: int = 100,
+    ) -> tuple[list[HeroWinRateStat], date, date] | None:
+        if top_count < 1 or min_games < 1:
+            raise ValueError("top_count 和 min_games 必须大于 0")
+        # 原子替换保证读到完整旧快照；不取刷新锁，也不修改刷新线程的周期状态。
+        snapshot = self._load_cache_document().get("snapshot")
+        try:
+            age = self._now().timestamp() - float(snapshot["cached_at"])
+            if not 0 <= age <= self.max_cache_age_seconds:
+                return None
+            start = date.fromisoformat(snapshot["period_start"])
+            end = date.fromisoformat(snapshot["period_end"])
+            if (end - start).days != STAT_PERIOD_DAYS - 1:
+                return None
+            rows = snapshot["data"]
+            if not isinstance(rows, list):
+                return None
+            stats = self._aggregate_monthly_stats(rows)
+        except (KeyError, TypeError, ValueError, OverflowError, OpenDotaApiError):
+            return None
+        eligible = [stat for stat in stats if stat.games >= min_games]
+        eligible.sort(key=lambda stat: (-stat.win_rate, -stat.games, stat.hero_id))
+        return eligible[:top_count], start, end
+
     def get_all_rank_win_rate_leaders(
         self,
         top_count: int = 10,

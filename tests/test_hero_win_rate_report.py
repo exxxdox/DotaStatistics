@@ -71,3 +71,22 @@ def test_empty_statistics_report_has_no_ai_analysis() -> None:
 
     assert "当前统计周期样本不足。" in report
     assert "DeepSeek" not in report
+
+
+def test_cached_report_uses_snapshot_dates_without_refresh() -> None:
+    client = StubOpenDotaClient([])
+    client.get_cached_month_win_rate_leaders = lambda **kwargs: (
+        [HeroWinRateStat(1, "Anti-Mage", 200, 120)],
+        date(2026, 7, 27), date(2026, 8, 25),
+    )
+    report = HeroWinRateReportService(api_client=client).build_cached()
+    assert "2026-07-27 至 2026-08-25" in report
+    assert "当前展示最近一次成功缓存" in report
+    assert "暂不可用" not in report
+    assert client.arguments is None
+
+
+def test_cached_report_is_absent_without_valid_snapshot() -> None:
+    client = StubOpenDotaClient([])
+    client.get_cached_month_win_rate_leaders = lambda **kwargs: None
+    assert HeroWinRateReportService(api_client=client).build_cached() is None

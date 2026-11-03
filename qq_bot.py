@@ -51,6 +51,7 @@ class MyClient(botpy.Client):
         # 单个任务引用同时保活后台查询和保留缓存，无需另一份任务集合。
         self._hero_report_task: asyncio.Task[str] | None = None
         self._hero_report_completed_at = 0.0
+        self._hero_report_refresh_task: asyncio.Task[None] | None = None
         self._hero_report_day: date | None = None
         self._command_discovery_configured = False
         # 弱引用避免访问过的会话永久累积，同时让同会话状态变更保持顺序。
@@ -58,6 +59,9 @@ class MyClient(botpy.Client):
 
     async def on_ready(self) -> None:
         _log.info(f"robot 「{self.robot.name}」 on_ready!")
+        # 重连可能再次触发 on_ready；只保留一个预热与定期补齐任务。
+        if self._hero_report_refresh_task is None or self._hero_report_refresh_task.done():
+            self._hero_report_refresh_task = asyncio.create_task(self._refresh_hero_reports())
         if not self._command_discovery_configured:
             try:
                 await self.command_discovery.configure()
@@ -164,26 +168,48 @@ class MyClient(botpy.Client):
         # 只记消息 ID，用户标识和对话正文不进入普通运行日志。
         _log.info(f"消息回复成功: message_id={getattr(result, 'id', None)}")
 
+    async def _refresh_hero_reports(self) -> None:
+        # 启动即预热，定期检查可在跨 UTC 日后补齐，并让失败查询冷却后重试。
+        while True:
+            try:
+                await self._build_hero_report_with_deadline()
+            except Exception:
+                _log.exception("预热英雄胜率数据失败")
+            await asyncio.sleep(HERO_REPORT_CACHE_SECONDS)
+
     async def _build_hero_report_with_deadline(self) -> str:
-        """复用统计刷新与近期结果，避免重复查询启动另一批上游请求。"""
+        """优先交付完整快照，后台刷新去重并限制失败重试频率。"""
         loop = asyncio.get_running_loop()
         today = datetime.now(timezone.utc).date()
         task = self._hero_report_task
-        if task is None or (task.done() and (
-            task.cancelled() or task.exception() is not None
-            or self._hero_report_day != today
-            or loop.time() - self._hero_report_completed_at >= HERO_REPORT_CACHE_SECONDS
-        )):
+        if task is not None and task.done() and not task.cancelled() and task.exception() is None:
+            if self._hero_report_day == today and loop.time() - self._hero_report_completed_at < HERO_REPORT_CACHE_SECONDS:
+                return task.result()
+
+        # 读取磁盘快照不等待网络刷新锁，首次查询与进程重启都能立即使用旧榜单。
+        cached = await asyncio.to_thread(self.hero_win_rate_report.build_cached)
+        # await 期间任务可能已完成或被其他请求替换；随后判断与创建不再让出事件循环。
+        task = self._hero_report_task
+        if task is not None and task.done():
+            cooling_down = loop.time() - self._hero_report_completed_at < HERO_REPORT_CACHE_SECONDS
+            if task.cancelled() or task.exception() is not None:
+                if cooling_down:
+                    return cached or "英雄胜率更新失败，请稍后再次查询。"
+            elif self._hero_report_day == today and cooling_down:
+                return task.result()
+            task = None
+        if task is None:
             task = asyncio.create_task(asyncio.to_thread(self.hero_win_rate_report.build))
             self._hero_report_task = task
             self._hero_report_day = today
             task.add_done_callback(self._finish_background_report)
+        if cached is not None:
+            return cached
         try:
             return await asyncio.wait_for(
                 asyncio.shield(task), timeout=self.hero_report_reply_timeout
             )
         except TimeoutError:
-            # 保留同一任务继续逐日落盘，重试不会启动另一批查询。
             return "英雄胜率数据正在更新，请稍后再次查询。"
 
     def _finish_background_report(self, task: asyncio.Task[str]) -> None:
