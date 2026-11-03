@@ -3,7 +3,7 @@ name: Release Docker image
 on:
   push:
     tags:
-      - "**"
+      - "v*"
 
 permissions:
   contents: write
@@ -59,6 +59,21 @@ jobs:
           docker save --output "$archive" "$image_ref"
 
           echo "archive=$archive" >>"$GITHUB_OUTPUT"
+          echo "image_ref=$image_ref" >>"$GITHUB_OUTPUT"
+
+      - name: Push Docker Hub image
+        env:
+          DOCKERHUB_USERNAME: ${{ vars.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          IMAGE_REF: ${{ steps.package.outputs.image_ref }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # 复用 TAR 对应的镜像，避免重复构建导致两处发布内容不同。
+          docker tag "$IMAGE_REF" exxxdox/pri:dota
+          # 令牌只通过标准输入传递，避免出现在命令参数和日志中。
+          printf '%s' "$DOCKERHUB_TOKEN" | docker login --username "$DOCKERHUB_USERNAME" --password-stdin
+          docker push exxxdox/pri:dota
 
       - name: Create or update GitHub Release
         env:
