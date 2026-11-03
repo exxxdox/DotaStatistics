@@ -673,6 +673,17 @@ def test_agent_player_profile_uses_fixed_endpoint_and_removes_private_links() ->
     ("view", "endpoint", "params", "payload", "expected"),
     [
         ("win_loss", "wl", {"date": 30}, {"win": 7, "lose": 3, "x": 1}, {"win": 7, "lose": 3}),
+        (
+            "matches", "matches",
+            {"date": 30, "limit": 2, "project": (
+                "match_id", "start_time", "game_mode", "lobby_type",
+                "radiant_win", "player_slot", "hero_id", "kills", "deaths",
+                "assists", "duration", "gold_per_min", "xp_per_min",
+                "hero_damage", "hero_healing", "tower_damage",
+            )},
+            [{"match_id": 9, "hero_id": 1, "kills": 3, "chat": "ignore"}] * 3,
+            [{"match_id": 9, "hero_id": 1, "kills": 3}] * 2,
+        ),
         ("heroes", "heroes", {"date": 30}, [{"hero_id": 1, "games": 9, "img": "x"}] * 3, [{"hero_id": 1, "games": 9}] * 2),
         ("peers", "peers", {"date": 30}, [{"account_id": 8, "personaname": "P", "avatar": "x"}], [{"account_id": 8, "personaname": "P"}]),
         ("totals", "totals", {"date": 30}, [{"field": "kills", "n": 3, "sum": 9, "other": 1}], [{"field": "kills", "n": 3, "sum": 9}]),
@@ -683,7 +694,7 @@ def test_agent_player_profile_uses_fixed_endpoint_and_removes_private_links() ->
 def test_agent_player_views_use_exact_paths_params_and_projection(
     view: str,
     endpoint: str,
-    params: dict[str, int] | None,
+    params: dict[str, Any] | None,
     payload: Any,
     expected: Any,
 ) -> None:
@@ -812,6 +823,8 @@ def test_agent_team_views_use_fixed_endpoints(
         ("top_players", "/playersByRank", [{"account_id": 4, "personaname": "P", "avatar": "x"}], [{"account_id": 4, "personaname": "P"}]),
         ("hero_stats", "/heroStats", [{"hero_id": 5, "localized_name": "Hero", "img": "x"}], [{"hero_id": 5, "localized_name": "Hero"}]),
         ("pro_players", "/proPlayers", [{"account_id": 6, "team_name": "T", "steamid": "x"}], [{"account_id": 6, "team_name": "T"}]),
+        ("teams", "/teams", [{"team_id": 7, "name": "T", "rating": 1500, "logo_url": "x"}], [{"team_id": 7, "name": "T", "rating": 1500}]),
+        ("leagues", "/leagues", [{"leagueid": 8, "name": "L", "tier": "premium", "banner": "x"}], [{"leagueid": 8, "name": "L", "tier": "premium"}]),
     ],
 )
 def test_agent_global_views_use_fixed_endpoints_and_limit_rows(

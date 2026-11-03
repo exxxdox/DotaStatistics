@@ -36,6 +36,8 @@ MATCH_REPORT_FIELDS = (
 )
 
 PLAYER_VIEW_FIELDS = {
+    # AI 需要 match_id 才能继续查询单场详情，不能只读取面向 QQ 的中文战报。
+    "matches": ("match_id", "start_time", "game_mode", *MATCH_REPORT_FIELDS),
     "win_loss": ("win", "lose"),
     "heroes": (
         "hero_id", "last_played", "games", "win", "with_games", "with_win",
@@ -73,6 +75,8 @@ TEAM_VIEW_FIELDS = {
     "heroes": ("hero_id", "name", "games_played", "wins"),
 }
 GLOBAL_VIEW_FIELDS = {
+    "teams": TEAM_VIEW_FIELDS["overview"],
+    "leagues": ("leagueid", "name", "tier"),
     "live_matches": (
         "match_id", "game_time", "average_mmr", "game_mode", "league_id",
         "series_id", "team_id_radiant", "team_name_radiant", "team_id_dire",
@@ -233,6 +237,7 @@ class OpenDotaApiClient:
             raise ValueError("view 不是允许的玩家查询")
 
         endpoints = {
+            "matches": "/matches",
             "profile": "",
             "win_loss": "/wl",
             "heroes": "/heroes",
@@ -249,6 +254,12 @@ class OpenDotaApiClient:
             if view in {"win_loss", "heroes", "peers", "totals", "counts"}
             else None
         )
+        if view == "matches":
+            # 明细接口可以在上游限量；汇总接口的 limit 会改变统计口径。
+            # 显式请求经济、伤害等非默认列，避免明细缺失分析所需字段。
+            params = {
+                "date": days, "limit": limit, "project": PLAYER_VIEW_FIELDS[view],
+            }
         # Agent 查询快速失败，避免一次对话被上游重试阻塞数分钟。
         payload = self._get(
             path,
@@ -348,6 +359,8 @@ class OpenDotaApiClient:
         """查询固定的 OpenDota 全局只读数据，不接受任意资源名称。"""
         self._validate_range(limit, "limit", 1, 20)
         paths = {
+            "teams": "/teams",
+            "leagues": "/leagues",
             "live_matches": "/live",
             "pro_matches": "/proMatches",
             "public_matches": "/publicMatches",

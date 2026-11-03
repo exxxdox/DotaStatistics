@@ -13,6 +13,8 @@ https://docs.opendota.com
 
 Compose persists `/data` in a `dota-data` named volume. The entrypoint may run as root only to detect inaccessible or non-bot-owned imported data, repair it when needed, and immediately drop to UID/GID `10001:10001` before Python starts. Offline imports must stop the bot before copying data into the volume.
 
+AI tool view enums reuse the projection keys in `lib/open_dota_client.py`; keep fixed endpoint mappings and projection tests synchronized when adding views. Player `matches` returns bounded structured match IDs for follow-up analysis without changing legacy formatted reports. Global `teams` and `leagues` return partial upstream lists, not name search results.
+
 ## Build, Test, and Development Commands
 
 - `uv sync` creates `.venv` and installs locked development dependencies.
