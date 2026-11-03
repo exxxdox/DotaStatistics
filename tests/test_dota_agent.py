@@ -148,6 +148,7 @@ def test_player_views_resolve_bound_nickname_and_route_all_arguments() -> None:
 
     for view in (
         "profile",
+        "matches",
         "win_loss",
         "heroes",
         "peers",
@@ -203,6 +204,8 @@ def test_hero_team_and_global_views_route_to_corresponding_client_methods() -> N
         "top_players",
         "hero_stats",
         "pro_players",
+        "teams",
+        "leagues",
     ):
         assert json.loads(
             tools.execute("get_global_dota_data", {"view": view, "limit": 9})
@@ -275,7 +278,7 @@ def test_new_tools_reject_missing_extra_unknown_views_and_numeric_boundaries() -
     invalid_views = [
         (
             "get_player_data",
-            {"nickname": "Alice", "view": "matches", "days": 30, "limit": 5},
+            {"nickname": "Alice", "view": "refresh", "days": 30, "limit": 5},
         ),
         ("get_hero_data", {"hero_id": 1, "view": "players", "limit": 5}),
         ("get_team_data", {"team_id": 1, "view": "rankings", "limit": 5}),

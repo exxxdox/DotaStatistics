@@ -4,31 +4,22 @@ import json
 import threading
 from typing import Any
 
-from lib.open_dota_client import OpenDotaApiClient
+from lib.open_dota_client import (
+    GLOBAL_VIEW_FIELDS,
+    HERO_VIEW_FIELDS,
+    PLAYER_VIEW_FIELDS,
+    TEAM_VIEW_FIELDS,
+    OpenDotaApiClient,
+)
 from lib.player_repository import PlayerRepository
 
 
 MAX_TOOL_OUTPUT_CHARS = 8_000
-PLAYER_VIEWS = [
-    "profile",
-    "win_loss",
-    "heroes",
-    "peers",
-    "totals",
-    "counts",
-    "ratings",
-    "rankings",
-]
-HERO_VIEWS = ["matchups", "durations", "recent_matches", "rankings"]
-TEAM_VIEWS = ["overview", "matches", "players", "heroes"]
-GLOBAL_VIEWS = [
-    "live_matches",
-    "pro_matches",
-    "public_matches",
-    "top_players",
-    "hero_stats",
-    "pro_players",
-]
+# Schema 与客户端投影共用视图来源，避免新增查询只在一端生效。
+PLAYER_VIEWS = ["profile", *PLAYER_VIEW_FIELDS, "counts"]
+HERO_VIEWS = [*HERO_VIEW_FIELDS, "rankings"]
+TEAM_VIEWS = list(TEAM_VIEW_FIELDS)
+GLOBAL_VIEWS = list(GLOBAL_VIEW_FIELDS)
 NETWORK_TOOLS = {
     "get_recent_ranked_matches",
     "get_today_matches",
@@ -94,7 +85,8 @@ class DotaAgentTools:
             ),
             self._definition(
                 "get_player_data",
-                "按视图查询已绑定选手的 OpenDota 资料或统计。",
+                "查询已绑定选手资料或统计；matches 返回最近对局明细（不限天梯），"
+                "包含 match_id，可继续调用 get_match_data 分析单场。",
                 {
                     "nickname": nickname_parameter,
                     "view": {"type": "string", "enum": PLAYER_VIEWS},
@@ -102,7 +94,7 @@ class DotaAgentTools:
                         "type": "integer",
                         "minimum": 1,
                         "maximum": 365,
-                        "description": "统计最近多少天。",
+                        "description": "matches、胜负、英雄池、队友、totals、counts 查询最近多少天；其他视图忽略。",
                     },
                     "limit": limit_parameter,
                 },
@@ -141,7 +133,9 @@ class DotaAgentTools:
             ),
             self._definition(
                 "get_global_dota_data",
-                "按视图查询实时比赛、职业比赛或全局统计。",
+                "查询实时、职业、公开比赛或全局统计；teams 返回战队及 team_id，"
+                "leagues 返回联赛及 leagueid。列表只返回上游前 limit 条，"
+                "不支持按名称搜索，不代表完整目录。",
                 {
                     "view": {"type": "string", "enum": GLOBAL_VIEWS},
                     "limit": limit_parameter,
