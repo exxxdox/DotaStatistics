@@ -13,3 +13,6 @@ __pycache__/
 /dist
 /compose.override.yaml
 /dota.tar
+# 临时验证产物和输出文档不进入版本库。
+/tmp/
+/docs/

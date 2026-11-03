@@ -6,6 +6,8 @@ import sqlite3
 import string
 import zlib
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+from threading import Barrier, BrokenBarrierError, Event
 
 import pytest
 
@@ -122,6 +124,93 @@ def test_total_budget_evicts_oldest_conversation(tmp_path):
     assert not alice.exists()
     assert bob.exists()
     assert sum(path.stat().st_size for path in tmp_path.glob("*.sqlite3")) <= limit
+
+
+def test_concurrent_total_budget_checks_do_not_evict_extra_conversations(tmp_path, monkeypatch):
+    store = ConversationMemory(tmp_path)
+    other = ConversationMemory(tmp_path)
+    for nickname in ("alice", "bob", "carol"):
+        store.append(f"c2c:{nickname}", "user", nickname)
+    alice, _ = store._location("c2c:alice")
+    bob, _ = store._location("c2c:bob")
+    carol, _ = store._location("c2c:carol")
+    os.utime(carol, (1, 1))
+    store.total_limit_bytes = other.total_limit_bytes = alice.stat().st_size * 2
+    deleting_oldest = Barrier(2)
+    original_unlink = Path.unlink
+
+    def overlapping_unlink(path, *args, **kwargs):
+        if path == carol:
+            # 旧实现会在同一份过期容量快照上同时删除；串行实现只会到达一次。
+            try:
+                deleting_oldest.wait(timeout=1)
+            except BrokenBarrierError:
+                pass
+        return original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", overlapping_unlink)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(store._enforce_total_limit, alice)
+        second = executor.submit(other._enforce_total_limit, bob)
+        first.result(timeout=5)
+        second.result(timeout=5)
+
+    assert alice.exists() and bob.exists()
+    assert not carol.exists()
+
+
+@pytest.mark.parametrize("budget_on_startup", [False, True])
+def test_total_budget_waits_for_another_stores_open_read(
+    tmp_path, monkeypatch, budget_on_startup,
+):
+    store = ConversationMemory(tmp_path)
+    other = ConversationMemory(tmp_path)
+    store.append("c2c:alice", "user", "keep while reading")
+    store.append("c2c:bob", "user", "other conversation")
+    alice, _ = store._location("c2c:alice")
+    bob, _ = store._location("c2c:bob")
+    other.total_limit_bytes = bob.stat().st_size
+    reading = Event()
+    release_read = Event()
+    attempted_delete = Event()
+    original_decompress = zlib.decompress
+    original_unlink = Path.unlink
+
+    def paused_decompress(payload):
+        reading.set()
+        assert release_read.wait(timeout=5)
+        return original_decompress(payload)
+
+    def checked_unlink(path, *args, **kwargs):
+        if path == alice:
+            attempted_delete.set()
+            assert release_read.is_set(), "evicted a database with an open reader"
+        return original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(zlib, "decompress", paused_decompress)
+    monkeypatch.setattr(Path, "unlink", checked_unlink)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(store.read, "c2c:alice")
+        assert reading.wait(timeout=5)
+        # 读取连接的 PRAGMA 可能更新 mtime，显式固定启动淘汰的最旧目标。
+        os.utime(alice, (1, 1))
+        second = (
+            executor.submit(
+                ConversationMemory, tmp_path, total_limit_bytes=other.total_limit_bytes,
+            )
+            if budget_on_startup
+            else executor.submit(other._enforce_total_limit, bob)
+        )
+        try:
+            attempted_delete.wait(timeout=0.2)
+        finally:
+            release_read.set()
+        assert first.result(timeout=5) == [
+            {"role": "user", "content": "keep while reading"}
+        ]
+        second.result(timeout=5)
+    assert not alice.exists()
+    assert bob.exists()
 
 
 def test_lowering_limit_shrinks_existing_database(tmp_path):

@@ -28,6 +28,12 @@ MAX_EXTERNAL_TEXT_CHARS = 160
 # 查询结果最终只保留有限字段；解析前仍要限制原文大小，防止异常上游耗尽内存。
 MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 RESPONSE_CHUNK_BYTES = 64 * 1024
+# /matches 的默认列不含经济和伤害；显式投影必须同时带齐格式化所需的基础列。
+MATCH_REPORT_FIELDS = (
+    "lobby_type", "radiant_win", "player_slot", "hero_id", "kills", "deaths",
+    "assists", "duration", "gold_per_min", "xp_per_min", "hero_damage",
+    "hero_healing", "tower_damage",
+)
 
 PLAYER_VIEW_FIELDS = {
     "win_loss": ("win", "lose"),
@@ -237,8 +243,9 @@ class OpenDotaApiClient:
             "rankings": "/rankings",
         }
         path = f"/players/{account_id}{endpoints[view]}"
+        # OpenDota 的 limit 限制参与汇总的比赛数，输出行数只能在本地限制。
         params = (
-            {"date": days, "limit": limit}
+            {"date": days}
             if view in {"win_loss", "heroes", "peers", "totals", "counts"}
             else None
         )
@@ -364,7 +371,11 @@ class OpenDotaApiClient:
         try:
             # Agent 查询槽只有四个，慢请求不能继承普通查询的 30 秒超时和重试。
             payload = self._get(
-                f"/players/{account_id}/recentMatches",
+                # recentMatches 仅含最后 20 场所有模式，必须先在上游筛选天梯。
+                f"/players/{account_id}/matches",
+                params={
+                    "lobby_type": 7, "limit": limit, "project": MATCH_REPORT_FIELDS,
+                },
                 timeout=AGENT_QUERY_TIMEOUT_SECONDS,
                 max_retries=0,
             )
@@ -410,7 +421,7 @@ class OpenDotaApiClient:
         try:
             payload = self._get(
                 f"/players/{account_id}/matches",
-                params={"date": date},
+                params={"date": date, "project": MATCH_REPORT_FIELDS},
                 timeout=AGENT_QUERY_TIMEOUT_SECONDS,
                 max_retries=0,
             )

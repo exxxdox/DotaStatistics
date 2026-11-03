@@ -5,6 +5,7 @@ import json
 import os
 import sqlite3
 import tempfile
+import threading
 import zlib
 from contextlib import closing
 from datetime import datetime, timezone
@@ -13,6 +14,8 @@ from pathlib import Path
 from typing import Literal
 
 DEFAULT_TOTAL_LIMIT_BYTES = 2_000_000_000
+# 同进程所有实例共用存储锁，淘汰不能使用过期快照或删除仍在使用的 SQLite 文件。
+_STORAGE_LOCK = threading.RLock()
 
 
 class ConversationMemory:
@@ -23,21 +26,22 @@ class ConversationMemory:
         group_limit_bytes: int = 200_000_000,
         total_limit_bytes: int = DEFAULT_TOTAL_LIMIT_BYTES,
     ) -> None:
-        if min(user_limit_bytes, group_limit_bytes) < 16_384:
-            raise ValueError("Conversation limits must be at least 16384 bytes")
-        if total_limit_bytes < 16_384:
-            raise ValueError("Conversation total limit must be at least 16384 bytes")
-        self.root = Path(root)
-        self.root.mkdir(parents=True, exist_ok=True)
-        self._secure_permissions(self.root, 0o700)
-        for database in self.root.glob("*.sqlite3"):
-            if database.is_file() and not database.is_symlink():
-                self._secure_permissions(database, 0o600)
-        self.user_limit_bytes = user_limit_bytes
-        self.group_limit_bytes = group_limit_bytes
-        self.total_limit_bytes = total_limit_bytes
-        # 启动时先回收最旧会话，避免历史版本留下的数据长期超出总预算。
-        self._enforce_total_limit(None)
+        with _STORAGE_LOCK:
+            if min(user_limit_bytes, group_limit_bytes) < 16_384:
+                raise ValueError("Conversation limits must be at least 16384 bytes")
+            if total_limit_bytes < 16_384:
+                raise ValueError("Conversation total limit must be at least 16384 bytes")
+            self.root = Path(root)
+            self.root.mkdir(parents=True, exist_ok=True)
+            self._secure_permissions(self.root, 0o700)
+            for database in self.root.glob("*.sqlite3"):
+                if database.is_file() and not database.is_symlink():
+                    self._secure_permissions(database, 0o600)
+            self.user_limit_bytes = user_limit_bytes
+            self.group_limit_bytes = group_limit_bytes
+            self.total_limit_bytes = total_limit_bytes
+            # 启动时先回收最旧会话，避免历史版本留下的数据长期超出总预算。
+            self._enforce_total_limit(None)
 
     @staticmethod
     def _secure_permissions(path: Path, mode: int) -> None:
@@ -46,33 +50,34 @@ class ConversationMemory:
 
     def _enforce_total_limit(self, active_path: Path | None) -> None:
         """按最后活动时间淘汰最旧会话，给所有数据库一个总容量预算。"""
-        databases = [
-            path
-            for path in self.root.glob("*.sqlite3")
-            if path.is_file() and not path.is_symlink()
-        ]
-        # 并发写入可能同时淘汰同一文件，进程内也不能假设目录快照始终有效。
-        total = 0
-        for path in databases:
-            try:
-                total += path.stat().st_size
-            except OSError:
-                continue
-        if total <= self.total_limit_bytes:
-            return
-        # 当前正在写入的数据库始终保留；删除失败说明仍有进程使用，跳过本次。
-        for path in sorted(
-            (path for path in databases if path != active_path),
-            key=self._file_mtime_ns,
-        ):
+        with _STORAGE_LOCK:
+            databases = [
+                path
+                for path in self.root.glob("*.sqlite3")
+                if path.is_file() and not path.is_symlink()
+            ]
+            # 外部文件操作仍可能改变目录，扫描和删除均允许文件已不存在。
+            total = 0
+            for path in databases:
+                try:
+                    total += path.stat().st_size
+                except OSError:
+                    continue
             if total <= self.total_limit_bytes:
-                break
-            try:
-                size = path.stat().st_size
-                path.unlink()
-            except OSError:
-                continue
-            total -= size
+                return
+            # 保留刚写入的会话；存储锁保证本进程其他连接已关闭，删除失败则跳过。
+            for path in sorted(
+                (path for path in databases if path != active_path),
+                key=self._file_mtime_ns,
+            ):
+                if total <= self.total_limit_bytes:
+                    break
+                try:
+                    size = path.stat().st_size
+                    path.unlink()
+                except OSError:
+                    continue
+                total -= size
 
     @staticmethod
     def _file_mtime_ns(path: Path) -> int:
@@ -228,54 +233,56 @@ class ConversationMemory:
     def get_pending(
         self, conversation_id: str, speaker_id: str,
     ) -> tuple[str, list[str]] | None:
-        path, limit = self._location(conversation_id)
-        speaker = self._speaker_key(speaker_id)
-        if not path.exists():
-            return None
-        with closing(self._connect(path, limit)) as connection:
-            if not connection.execute(
-                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'pending'"
-            ).fetchone():
+        with _STORAGE_LOCK:
+            path, limit = self._location(conversation_id)
+            speaker = self._speaker_key(speaker_id)
+            if not path.exists():
                 return None
-            row = connection.execute(
-                "SELECT payload FROM pending WHERE speaker = ?", (speaker,)
-            ).fetchone()
-            if row is None:
-                return None
-            try:
-                state = json.loads(zlib.decompress(row[0]).decode("utf-8"))
-                self._validate_pending(state)
-                return state[0], state[1]
-            except (zlib.error, UnicodeError, ValueError, TypeError) as error:
-                raise ValueError("Corrupt compressed pending state") from error
+            with closing(self._connect(path, limit)) as connection:
+                if not connection.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'pending'"
+                ).fetchone():
+                    return None
+                row = connection.execute(
+                    "SELECT payload FROM pending WHERE speaker = ?", (speaker,)
+                ).fetchone()
+                if row is None:
+                    return None
+                try:
+                    state = json.loads(zlib.decompress(row[0]).decode("utf-8"))
+                    self._validate_pending(state)
+                    return state[0], state[1]
+                except (zlib.error, UnicodeError, ValueError, TypeError) as error:
+                    raise ValueError("Corrupt compressed pending state") from error
 
     def set_pending(
         self, conversation_id: str, speaker_id: str,
         state: tuple[str, list[str]] | None,
     ) -> None:
-        path, limit = self._location(conversation_id)
-        speaker = self._speaker_key(speaker_id)
-        if state is None:
-            if not path.exists():
+        with _STORAGE_LOCK:
+            path, limit = self._location(conversation_id)
+            speaker = self._speaker_key(speaker_id)
+            if state is None:
+                if not path.exists():
+                    return
+                with closing(self._connect(path, limit)) as connection:
+                    if connection.execute(
+                        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'pending'"
+                    ).fetchone():
+                        connection.execute("DELETE FROM pending WHERE speaker = ?", (speaker,))
                 return
+            self._validate_pending(state)
+            payload = zlib.compress(json.dumps(state, ensure_ascii=False).encode("utf-8"), 9)
             with closing(self._connect(path, limit)) as connection:
-                if connection.execute(
-                    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'pending'"
-                ).fetchone():
-                    connection.execute("DELETE FROM pending WHERE speaker = ?", (speaker,))
-            return
-        self._validate_pending(state)
-        payload = zlib.compress(json.dumps(state, ensure_ascii=False).encode("utf-8"), 9)
-        with closing(self._connect(path, limit)) as connection:
-            self._bounded_write(
-                connection, self._pending_schema(), (), payload, limit, pending=True,
-            )
-            self._bounded_write(
-                connection,
-                "INSERT OR REPLACE INTO pending(speaker, payload) VALUES (?, ?)",
-                (speaker, payload), payload, limit, pending=True,
-            )
-        self._enforce_total_limit(path)
+                self._bounded_write(
+                    connection, self._pending_schema(), (), payload, limit, pending=True,
+                )
+                self._bounded_write(
+                    connection,
+                    "INSERT OR REPLACE INTO pending(speaker, payload) VALUES (?, ?)",
+                    (speaker, payload), payload, limit, pending=True,
+                )
+            self._enforce_total_limit(path)
 
     def append(
         self,
@@ -284,46 +291,48 @@ class ConversationMemory:
         content: str,
         speaker_id: str | None = None,
     ) -> int:
-        path, limit = self._location(conversation_id)
-        if role not in ("user", "assistant"):
-            raise ValueError("Message role must be user or assistant")
-        if not isinstance(content, str):
-            raise TypeError("Message content must be a string")
-        payload = zlib.compress(
-            json.dumps(
-                {
-                    "role": role,
-                    "content": content,
-                    "speaker_id": speaker_id,
-                    "created_at": datetime.now(timezone.utc).isoformat(),
-                },
-                ensure_ascii=False,
-                separators=(",", ":"),
-            ).encode("utf-8"),
-            level=9,
-        )
-        with closing(self._connect(path, limit)) as connection:
-            cursor = self._bounded_write(
-                connection, "INSERT INTO messages(payload) VALUES (?)", (payload,), payload, limit,
+        with _STORAGE_LOCK:
+            path, limit = self._location(conversation_id)
+            if role not in ("user", "assistant"):
+                raise ValueError("Message role must be user or assistant")
+            if not isinstance(content, str):
+                raise TypeError("Message content must be a string")
+            payload = zlib.compress(
+                json.dumps(
+                    {
+                        "role": role,
+                        "content": content,
+                        "speaker_id": speaker_id,
+                        "created_at": datetime.now(timezone.utc).isoformat(),
+                    },
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ).encode("utf-8"),
+                level=9,
             )
-            assert cursor.lastrowid is not None
-            message_id = cursor.lastrowid
-        self._enforce_total_limit(path)
-        return message_id
+            with closing(self._connect(path, limit)) as connection:
+                cursor = self._bounded_write(
+                    connection, "INSERT INTO messages(payload) VALUES (?)", (payload,), payload, limit,
+                )
+                assert cursor.lastrowid is not None
+                message_id = cursor.lastrowid
+            self._enforce_total_limit(path)
+            return message_id
 
     def clear(self, conversation_id: str) -> None:
         """清空当前会话的记录和所有成员追问，不影响其他会话或选手资料。"""
-        path, limit = self._location(conversation_id)
-        if not path.exists():
-            return
-        with closing(self._connect(path, limit)) as connection, connection:
-            # 原子删除而非移除数据库文件，避免并发连接写入失联文件；保留递增 ID。
-            connection.execute("BEGIN IMMEDIATE")
-            connection.execute("DELETE FROM messages")
-            if connection.execute(
-                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'pending'"
-            ).fetchone():
-                connection.execute("DELETE FROM pending")
+        with _STORAGE_LOCK:
+            path, limit = self._location(conversation_id)
+            if not path.exists():
+                return
+            with closing(self._connect(path, limit)) as connection, connection:
+                # 原子删除而非移除数据库文件，避免并发连接写入失联文件；保留递增 ID。
+                connection.execute("BEGIN IMMEDIATE")
+                connection.execute("DELETE FROM messages")
+                if connection.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'pending'"
+                ).fetchone():
+                    connection.execute("DELETE FROM pending")
 
     def read(
         self,
@@ -334,34 +343,35 @@ class ConversationMemory:
         *,
         before_id: int | None = None,
     ) -> list[dict[str, str]]:
-        path, limit = self._location(conversation_id)
-        if max_chars < 0 or max_messages < 0:
-            raise ValueError("Context limits must be nonnegative")
-        if not path.exists() or not max_chars or not max_messages:
-            return []
-        messages: list[dict[str, str]] = []
-        with closing(self._connect(path, limit)) as connection:
-            cursor = connection.execute(
-                "SELECT payload FROM messages WHERE (? IS NULL OR id < ?) "
-                "ORDER BY id DESC LIMIT ?",
-                (before_id, before_id, max_messages),
-            )
-            for (payload,) in cursor:
-                try:
-                    message = json.loads(zlib.decompress(payload).decode("utf-8"))
-                    role, content = message["role"], message["content"]
-                    if role not in ("user", "assistant") or not isinstance(content, str):
-                        raise ValueError("Invalid message fields")
-                except (zlib.error, UnicodeError, ValueError, KeyError, TypeError) as error:
-                    raise ValueError("Corrupt compressed conversation history") from error
-                # Keep the latest text when a single reply exceeds the model's context budget.
-                content = content[-max_chars:]
-                messages.append({"role": role, "content": content})
-                max_chars -= len(content)
-                if not max_chars:
-                    break
-        messages.reverse()
-        return messages
+        with _STORAGE_LOCK:
+            path, limit = self._location(conversation_id)
+            if max_chars < 0 or max_messages < 0:
+                raise ValueError("Context limits must be nonnegative")
+            if not path.exists() or not max_chars or not max_messages:
+                return []
+            messages: list[dict[str, str]] = []
+            with closing(self._connect(path, limit)) as connection:
+                cursor = connection.execute(
+                    "SELECT payload FROM messages WHERE (? IS NULL OR id < ?) "
+                    "ORDER BY id DESC LIMIT ?",
+                    (before_id, before_id, max_messages),
+                )
+                for (payload,) in cursor:
+                    try:
+                        message = json.loads(zlib.decompress(payload).decode("utf-8"))
+                        role, content = message["role"], message["content"]
+                        if role not in ("user", "assistant") or not isinstance(content, str):
+                            raise ValueError("Invalid message fields")
+                    except (zlib.error, UnicodeError, ValueError, KeyError, TypeError) as error:
+                        raise ValueError("Corrupt compressed conversation history") from error
+                    # Keep the latest text when a single reply exceeds the model's context budget.
+                    content = content[-max_chars:]
+                    messages.append({"role": role, "content": content})
+                    max_chars -= len(content)
+                    if not max_chars:
+                        break
+            messages.reverse()
+            return messages
 
 
 @lru_cache(maxsize=1)

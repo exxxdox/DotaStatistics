@@ -45,6 +45,11 @@ jobs:
           if [[ -z "$safe_tag" ]]; then
             safe_tag="${GITHUB_SHA:0:12}"
           fi
+          # Git 标签转换后可能以点或横线开头，Docker 要求首字符为字母、数字或下划线。
+          case "$safe_tag" in
+            [A-Za-z0-9_]*) ;;
+            *) safe_tag="v-${safe_tag}" ;;
+          esac
 
           image_ref="dota:${safe_tag}"
           archive="${project_name}-${safe_tag}-linux-amd64-docker-image.tar"
