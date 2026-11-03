@@ -49,12 +49,14 @@ sudo bash manage.sh init
 
 ## Tag 发布
 
-推送 Git tag 会自动构建 `linux/amd64` Docker 镜像，并在同名 GitHub Release 中上传 TAR：
+推送以 `v` 开头的 Git tag 会运行测试，通过后构建一次 `linux/amd64` Docker 镜像，推送至 `exxxdox/pri:dota`，并在同名 GitHub Release 中上传对应 TAR：
 
 ```bash
 git tag v1.0.0
 git push origin v1.0.0
 ```
+
+在仓库 Actions 设置中配置 Variable `DOCKERHUB_USERNAME` 和 Secret `DOCKERHUB_TOKEN`；Token 需有目标 Docker Hub 仓库的写权限。每次成功发布会覆盖 `exxxdox/pri:dota`。
 
 下载 Release 中的 TAR，然后直接导入镜像：
 
