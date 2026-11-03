@@ -513,6 +513,61 @@ def test_get_recent_matches_returns_none_on_api_error() -> None:
     assert client.get_recent_matches(123) is None
 
 
+def test_recent_ranked_query_finds_games_before_twenty_unranked_matches() -> None:
+    class RankedSession(FakeSession):
+        def get(self, *args, **kwargs) -> FakeResponse:
+            params = kwargs.get("params") or {}
+            # OpenDota recentMatches only exposes the last 20 games of all modes.
+            if args[0].endswith("/matches") and params.get("lobby_type") == 7:
+                assert params["limit"] == 2
+                return FakeResponse(200, [{
+                    "lobby_type": 7, "radiant_win": True, "player_slot": 0,
+                    "hero_id": 1, "kills": 5, "deaths": 3, "assists": 2,
+                    "hero_damage": 900, "gold_per_min": 500,
+                }])
+            return FakeResponse(200, [{"lobby_type": 0}] * 20)
+
+    client = OpenDotaApiClient(session=RankedSession([]), cache_path=None)
+
+    result = client.get_recent_matches(123, limit=2)
+
+    assert "英雄:英雄 1" in result
+    assert "gpm:500" in result
+
+
+@pytest.mark.parametrize("query", ["recent", "by_date"])
+def test_match_reports_request_every_displayed_field(query: str) -> None:
+    game = {
+        "lobby_type": 7, "radiant_win": True, "player_slot": 0,
+        "hero_id": 1, "kills": 5, "deaths": 3, "assists": 2,
+        "duration": 3000, "gold_per_min": 500, "xp_per_min": 400,
+        "hero_damage": 900, "tower_damage": 100, "hero_healing": 0,
+    }
+
+    class ProjectedSession(FakeSession):
+        def get(self, *args, **kwargs) -> FakeResponse:
+            # Explicit project replaces OpenDota's default matches columns.
+            fields = (kwargs.get("params") or {}).get("project", [])
+            return FakeResponse(200, [{
+                key: value for key, value in game.items() if key in fields
+            }])
+
+    client = OpenDotaApiClient(session=ProjectedSession([]), cache_path=None)
+    result = (
+        client.get_recent_matches(123)
+        if query == "recent" else client.get_matches_by_date(123, 1)
+    )
+
+    expected_kda = "击杀:5 死亡:3 助攻:2" if query == "by_date" else "杀:5 死:3 助攻:2"
+    assert expected_kda in result
+    assert "英雄:英雄 1" in result
+    assert "None" not in result
+    assert "500" in result
+    if query == "by_date":
+        assert "gpm 500 xpm 400" in result
+        assert "对英雄伤害900 对英雄治疗0 建筑伤害100" in result
+
+
 def test_get_matches_by_date_formats_detail_and_appends_end_marker() -> None:
     matches = [
         {
@@ -617,10 +672,10 @@ def test_agent_player_profile_uses_fixed_endpoint_and_removes_private_links() ->
 @pytest.mark.parametrize(
     ("view", "endpoint", "params", "payload", "expected"),
     [
-        ("win_loss", "wl", {"date": 30, "limit": 2}, {"win": 7, "lose": 3, "x": 1}, {"win": 7, "lose": 3}),
-        ("heroes", "heroes", {"date": 30, "limit": 2}, [{"hero_id": 1, "games": 9, "img": "x"}] * 3, [{"hero_id": 1, "games": 9}] * 2),
-        ("peers", "peers", {"date": 30, "limit": 2}, [{"account_id": 8, "personaname": "P", "avatar": "x"}], [{"account_id": 8, "personaname": "P"}]),
-        ("totals", "totals", {"date": 30, "limit": 2}, [{"field": "kills", "n": 3, "sum": 9, "other": 1}], [{"field": "kills", "n": 3, "sum": 9}]),
+        ("win_loss", "wl", {"date": 30}, {"win": 7, "lose": 3, "x": 1}, {"win": 7, "lose": 3}),
+        ("heroes", "heroes", {"date": 30}, [{"hero_id": 1, "games": 9, "img": "x"}] * 3, [{"hero_id": 1, "games": 9}] * 2),
+        ("peers", "peers", {"date": 30}, [{"account_id": 8, "personaname": "P", "avatar": "x"}], [{"account_id": 8, "personaname": "P"}]),
+        ("totals", "totals", {"date": 30}, [{"field": "kills", "n": 3, "sum": 9, "other": 1}], [{"field": "kills", "n": 3, "sum": 9}]),
         ("ratings", "ratings", None, [{"rank_tier": 70, "time": 1, "steamid": "x"}], [{"rank_tier": 70, "time": 1}]),
         ("rankings", "rankings", None, [{"hero_id": 2, "score": 4, "avatar": "x"}], [{"hero_id": 2, "score": 4}]),
     ],
@@ -662,7 +717,7 @@ def test_agent_player_counts_bounds_categories_and_entries() -> None:
         },
         "region": {"1": 4},
     }
-    assert session.requests[0][1]["params"] == {"date": 7, "limit": 2}
+    assert session.requests[0][1]["params"] == {"date": 7}
 
 
 def test_agent_match_query_projects_core_fields_and_ten_players() -> None:
