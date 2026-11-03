@@ -155,6 +155,9 @@ class OpenDotaApiClient:
         self.timeout = timeout
         self.hero_name_resolver = hero_name_resolver
         self.session = session or requests.Session()
+        proxy = os.environ.get("OPENDOTA_PROXY", "").strip()
+        # 按请求传入，确保专用代理优先于通用环境代理，且只影响 OpenDota。
+        self._proxy_options = {"proxies": {"http": proxy, "https": proxy}} if proxy else {}
         self.session.headers.setdefault("User-Agent", "DotaStatistics/0.1")
         self.max_retries = max_retries
         self.retry_backoff = retry_backoff
@@ -813,6 +816,7 @@ GROUP BY hero_id
                     timeout=request_timeout,
                     # 流式读取，字节上限必须早于完整 JSON 解析生效。
                     stream=True,
+                    **self._proxy_options,
                 )
                 response.raise_for_status()
                 return self._read_response_json(response)

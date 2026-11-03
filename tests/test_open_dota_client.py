@@ -55,6 +55,24 @@ class FakeSession:
         return response
 
 
+@pytest.mark.parametrize("proxy", [None, "", "  ", "http://127.0.0.1:7890", "https://proxy.example:8443"])
+def test_opendota_proxy_environment(monkeypatch, proxy: str | None) -> None:
+    if proxy is None:
+        monkeypatch.delenv("OPENDOTA_PROXY", raising=False)
+    else:
+        monkeypatch.setenv("OPENDOTA_PROXY", proxy)
+    session = FakeSession([FakeResponse(200, [])])
+    client = OpenDotaApiClient(session=session, cache_path=None)
+
+    client.get_heroes()
+
+    kwargs = session.requests[0][1]
+    if proxy and proxy.strip():
+        assert kwargs["proxies"] == {"http": proxy, "https": proxy}
+    else:
+        assert "proxies" not in kwargs
+
+
 def test_daily_query_uses_exact_utc_day_boundaries() -> None:
     client = OpenDotaApiClient(cache_path=None)
     captured_sql = ""

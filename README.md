@@ -105,7 +105,10 @@ Copy-Item .env.example .env
 | `DEEPSEEK_API_KEY` | 是 | DeepSeek API Key，用于 AI 聊天和点评 |
 | `DOTA_OPERATOR_IDS` | 否 | 允许执行 `追踪术` 的 QQ 用户 OpenID，多个值用逗号分隔；留空允许所有人修改共用名单 |
 | `OPENDOTA_API_KEY` | 否 | OpenDota API Key，可提高 API 调用限额 |
+| `OPENDOTA_PROXY` | 否 | 仅 OpenDota 使用的 HTTP/HTTPS 代理地址，例如 `http://127.0.0.1:7890`；留空保留 Requests 默认环境代理行为 |
 | `DOTA_AGENT_MAX_TOOL_CALLS` | 否 | 每次 AI 对话的工具调用上限，默认 `4`；必须为正整数，超过 `8` 按 `8` 处理 |
+
+`OPENDOTA_PROXY` 在客户端启动时读取，修改后需重启服务。Docker 内的 `127.0.0.1` 指向容器自身；Docker Desktop 访问宿主机代理时可使用 `http://host.docker.internal:7890`，代理需允许容器访问。此配置不影响 DeepSeek 或 QQ。
 
 注意：群 OpenID 是群标识，不能作为 `DOTA_OPERATOR_IDS` 中的用户 OpenID。
 
