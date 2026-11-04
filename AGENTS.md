@@ -20,6 +20,8 @@ QQ connections must apply lib/qq_sdk_security.py before SDK startup so both HTTP
 
 AI tool view enums reuse the projection keys in `lib/open_dota_client.py`; keep fixed endpoint mappings and projection tests synchronized when adding views. Player `matches` returns bounded structured match IDs for follow-up analysis without changing legacy formatted reports. Global `teams` and `leagues` return partial upstream lists, not name search results.
 
+QQ synchronous command dispatch uses one process-shared executor sized by DOTA_COMMAND_WORKERS (default 4, allowed 1–32), with the same nonblocking admission limit before submission; invalid configuration fails startup, and changes require restart. Full capacity returns a persisted busy reply without executing the command. Keep storage and hero-cache reads on the default executor. Release admission only when the underlying concurrent future completes, including after an awaiting task is cancelled; submission failures must also return capacity. Preserve context-variable propagation and only suppress the clear confirmation after the clear command actually executes.
+
 ## Build, Test, and Development Commands
 
 - `uv sync` creates `.venv` and installs locked development dependencies.

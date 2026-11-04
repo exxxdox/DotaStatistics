@@ -3,13 +3,16 @@
 import asyncio
 import logging
 import os
+from concurrent.futures import ThreadPoolExecutor
+from contextvars import copy_context
 from datetime import date, datetime, timezone
+from threading import BoundedSemaphore
 from weakref import WeakValueDictionary
 
 import botpy
 from botpy.message import C2CMessage, GroupMessage
 
-from data_center import _log
+from data_center import _log, command_workers
 from lib.conversation_memory import ConversationMemory
 from lib.qq_sdk_security import configure_qq_sdk_security
 # 保留旧模块的公开导入路径，避免部署扩展和已有调用方随职责拆分失效。
@@ -28,6 +31,9 @@ from service.qq_command_discovery import QQCommandDiscoveryService
 PRIVATE_HERO_REPORT_COMMAND = HERO_COMMAND.name
 HERO_REPORT_REPLY_TIMEOUT_SECONDS = 20.0
 HERO_REPORT_CACHE_SECONDS = 300.0
+# 网络业务与存储隔离；进程共享准入，避免重建客户端绕过上限或累积线程。
+_COMMAND_EXECUTOR = ThreadPoolExecutor(max_workers=command_workers, thread_name_prefix="qq-command")
+_COMMAND_SLOTS = BoundedSemaphore(command_workers)
 
 
 class MyClient(botpy.Client):
@@ -147,13 +153,23 @@ class MyClient(botpy.Client):
                     history_before_id=record_id,
                     speaker_id=speaker_id,
                 )
-                # 同步网络、压缩与数据库操作均移出事件循环。
-                reply = await asyncio.to_thread(
-                    self.router.dispatch, message.content, context
-                )
-                # 成功清空后不重新写入确认回复，数据库保持空白；失败提示仍照常记录。
-                if normalized_content == CLEAR_COMMAND.name:
-                    record_reply = False
+                # 提交前快速拒绝，不让慢 AI、参数追问或简报占满存储线程或排队。
+                if not _COMMAND_SLOTS.acquire(blocking=False):
+                    reply = "当前查询繁忙，请稍后再试。"
+                else:
+                    try:
+                        future = _COMMAND_EXECUTOR.submit(
+                            copy_context().run, self.router.dispatch, message.content, context
+                        )
+                    except BaseException:
+                        _COMMAND_SLOTS.release()
+                        raise
+                    # 取消等待不能停止运行中的线程，必须等真实工作完成才回收容量。
+                    future.add_done_callback(lambda _future: _COMMAND_SLOTS.release())
+                    reply = await asyncio.wrap_future(future)
+                    # 只有实际执行清空时才不记确认；繁忙提示仍正常落盘。
+                    if normalized_content == CLEAR_COMMAND.name:
+                        record_reply = False
         except Exception:
             _log.exception("处理对话失败")
             reply = "处理失败了，稍后再试。"

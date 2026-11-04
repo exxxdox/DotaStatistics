@@ -29,6 +29,17 @@ def _resolve_operator_ids() -> frozenset[str]:
     )
 
 
+def _resolve_command_workers() -> int:
+    """限定命令并发，避免错误配置放大线程和上游请求消耗。"""
+    try:
+        workers = int(os.environ.get("DOTA_COMMAND_WORKERS", "4"))
+    except ValueError as error:
+        raise ValueError("DOTA_COMMAND_WORKERS 必须是 1 至 32 的整数") from error
+    if not 1 <= workers <= 32:
+        raise ValueError("DOTA_COMMAND_WORKERS 必须是 1 至 32 的整数")
+    return workers
+
+
 data_dir = _resolve_data_dir()
 hero_names_path = resource_dir / "hero_name.json"
 common_id_path = data_dir / "name_id.json"
@@ -36,4 +47,5 @@ hero_stats_cache_path = data_dir / "daily_hero_stats_cache.json"
 # 与运行数据共用持久卷，避免容器重建后丢失长期对话。
 conversation_memory_dir = data_dir / "conversations"
 operator_ids = _resolve_operator_ids()
+command_workers = _resolve_command_workers()
 enable_ai = True

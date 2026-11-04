@@ -1,5 +1,7 @@
 import asyncio
 import time
+from concurrent.futures import ThreadPoolExecutor
+from threading import BoundedSemaphore
 from threading import Event
 from types import SimpleNamespace
 
@@ -114,6 +116,191 @@ def build_router(**overrides) -> CommandRouter:
 
 
 OPERATOR_CONTEXT = CommandContext(conversation_id="c2c:user-a", speaker_id="user-a")
+
+
+@pytest.fixture
+def command_pool(monkeypatch):
+    # 两个业务槽和两个默认线程即可稳定复现旧实现的共享线程池饥饿。
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        monkeypatch.setattr(qq_bot, "_COMMAND_EXECUTOR", pool, raising=False)
+        monkeypatch.setattr(qq_bot, "_COMMAND_SLOTS", BoundedSemaphore(2), raising=False)
+        yield pool
+
+
+@pytest.mark.parametrize("content", ["聊天", "撒情况", "简报"])
+def test_slow_commands_leave_storage_and_cached_reports_available(
+    command_pool, memory_store, content,
+) -> None:
+    release = Event()
+
+    async def run() -> None:
+        loop = asyncio.get_running_loop()
+        loop.set_default_executor(ThreadPoolExecutor(max_workers=2))
+        started = [asyncio.Event(), asyncio.Event()]
+        calls = []
+
+        def slow(*_args):
+            index = len(calls)
+            calls.append(True)
+            loop.call_soon_threadsafe(started[index].set)
+            assert release.wait(5)
+            return "完成"
+
+        class Message:
+            def __init__(self, text):
+                self.content = text
+                self.replies = []
+
+            async def reply(self, **kwargs):
+                self.replies.append(kwargs["content"])
+                return SimpleNamespace(id="reply-id")
+
+        def client():
+            return MyClient(
+                router=build_router(
+                    chat=slow, ask_command_parameter=slow, get_today_report=slow,
+                ),
+                hero_win_rate_report=SimpleNamespace(
+                    build=lambda: "新榜单", build_cached=lambda: "缓存榜单",
+                ),
+                intents=botpy.Intents(public_messages=True), ext_handlers=False,
+            )
+
+        bot, other = client(), client()
+        tasks = [
+            asyncio.create_task(bot._handle_message(Message(content), f"c2c:{i}", str(i)))
+            for i in range(2)
+        ]
+        try:
+            await asyncio.wait_for(asyncio.gather(*(event.wait() for event in started)), 1)
+            busy = Message("/clear")
+            await asyncio.wait_for(other._handle_message(busy, "c2c:busy", "busy"), 1)
+            assert busy.replies == ["当前查询繁忙，请稍后再试。"]
+            assert len(calls) == 2
+            assert memory_store.read("c2c:busy") == [
+                {"role": "user", "content": "/clear"},
+                {"role": "assistant", "content": busy.replies[0]},
+            ]
+            hero = Message("高胜率英雄")
+            await asyncio.wait_for(other._handle_message(hero, "c2c:hero", "hero"), 1)
+            assert hero.replies == ["缓存榜单"]
+        finally:
+            release.set()
+            await asyncio.gather(*tasks)
+        recent = Message("撒情况 小明")
+        await other._handle_message(recent, "c2c:recent", "recent")
+        assert recent.replies == ["比赛:123"]
+
+    asyncio.run(run())
+
+
+def test_cancelled_command_keeps_slot_until_worker_finishes(command_pool) -> None:
+    release = Event()
+
+    async def run() -> None:
+        loop = asyncio.get_running_loop()
+        started = [asyncio.Event(), asyncio.Event()]
+        calls = []
+
+        def slow(*_args):
+            index = len(calls)
+            calls.append(True)
+            loop.call_soon_threadsafe(started[index].set)
+            assert release.wait(5)
+            return "完成"
+
+        bot = MyClient(
+            router=build_router(chat=slow),
+            intents=botpy.Intents(public_messages=True), ext_handlers=False,
+        )
+
+        class Message:
+            content = "聊天"
+
+            async def reply(self, **kwargs):
+                replies.append(kwargs["content"])
+                return SimpleNamespace(id="reply-id")
+
+        replies = []
+        tasks = [
+            asyncio.create_task(bot._handle_message(Message(), f"c2c:{i}", str(i)))
+            for i in range(2)
+        ]
+        try:
+            await asyncio.wait_for(asyncio.gather(*(event.wait() for event in started)), 1)
+            tasks[0].cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await tasks[0]
+            await asyncio.wait_for(bot._handle_message(Message(), "c2c:extra", "extra"), 1)
+            assert replies == ["当前查询繁忙，请稍后再试。"]
+            assert len(calls) == 2
+        finally:
+            release.set()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            # 标记任务运行前，同池中已返回的业务 future 已执行槽位回收回调。
+            await asyncio.wrap_future(command_pool.submit(lambda: None))
+        bot.router = build_router()
+        await bot._handle_message(Message(), "c2c:recovered", "recovered")
+        assert replies[-1] == "AI:聊天"
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("failure", ["dispatch", "submit"])
+def test_command_failure_returns_capacity(command_pool, monkeypatch, failure) -> None:
+    replies = []
+
+    def fail(*_args):
+        raise RuntimeError("command failed")
+
+    class Message:
+        content = "聊天"
+
+        async def reply(self, **kwargs):
+            replies.append(kwargs["content"])
+            return SimpleNamespace(id="reply-id")
+
+    async def run() -> None:
+        bot = MyClient(
+            router=SimpleNamespace(dispatch=fail),
+            intents=botpy.Intents(public_messages=True), ext_handlers=False,
+        )
+        with monkeypatch.context() as patch:
+            if failure == "submit":
+                patch.setattr(command_pool, "submit", fail)
+            for i in range(3):
+                await bot._handle_message(Message(), f"c2c:failed-{i}", str(i))
+        assert replies == ["处理失败了，稍后再试。"] * 3
+        bot.router = build_router()
+        await bot._handle_message(Message(), "c2c:recovered", "recovered")
+        assert replies[-1] == "AI:聊天"
+
+    asyncio.run(run())
+
+
+def test_command_dispatch_preserves_context(command_pool) -> None:
+    from contextvars import ContextVar
+
+    request_context = ContextVar("request_context", default="missing")
+    replies = []
+
+    class Message:
+        content = "聊天"
+
+        async def reply(self, **kwargs):
+            replies.append(kwargs["content"])
+            return SimpleNamespace(id="reply-id")
+
+    async def run() -> None:
+        request_context.set("current-request")
+        bot = MyClient(
+            router=build_router(chat=lambda *_args: request_context.get()),
+            intents=botpy.Intents(public_messages=True), ext_handlers=False,
+        )
+        await bot._handle_message(Message(), "c2c:alice", "alice")
+
+    asyncio.run(run())
+    assert replies == ["current-request"]
 
 
 def test_same_conversation_messages_are_processed_in_order(memory_store) -> None:

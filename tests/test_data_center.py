@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 import data_center
 
 
@@ -28,3 +30,19 @@ def test_data_dir_accepts_container_volume_path(monkeypatch, tmp_path: Path) -> 
     monkeypatch.setenv("DATA_DIR", str(configured_dir))
 
     assert data_center._resolve_data_dir() == configured_dir.resolve()
+
+
+@pytest.mark.parametrize("configured, expected", [(None, 4), ("1", 1), (" 8 ", 8), ("32", 32)])
+def test_command_workers_configuration(monkeypatch, configured, expected) -> None:
+    if configured is None:
+        monkeypatch.delenv("DOTA_COMMAND_WORKERS", raising=False)
+    else:
+        monkeypatch.setenv("DOTA_COMMAND_WORKERS", configured)
+    assert data_center._resolve_command_workers() == expected
+
+
+@pytest.mark.parametrize("configured", ["", "0", "-1", "33", "1.5", "unlimited"])
+def test_command_workers_rejects_invalid_configuration(monkeypatch, configured) -> None:
+    monkeypatch.setenv("DOTA_COMMAND_WORKERS", configured)
+    with pytest.raises(ValueError, match="DOTA_COMMAND_WORKERS"):
+        data_center._resolve_command_workers()
