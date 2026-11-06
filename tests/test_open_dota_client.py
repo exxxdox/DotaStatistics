@@ -991,3 +991,119 @@ def test_get_rejects_oversized_response_body(monkeypatch) -> None:
 
     with pytest.raises(OpenDotaApiError, match="响应体过大"):
         client._get("/heroStats")
+
+
+# ---------------------------------------------------------------------------
+# 响应缓存测试
+# ---------------------------------------------------------------------------
+
+
+def test_response_cache_hit_skips_http(monkeypatch) -> None:
+    """相同 path + params 的重复 _get，第二次应命中缓存不再打 HTTP。"""
+    session = FakeSession([FakeResponse(200, {"win": 10, "lose": 5})])
+    client = OpenDotaApiClient(
+        session=session, max_retries=0, cache_path=None,
+    )
+    # 第一次：真实请求
+    result1 = client._get("/players/123/matches", params={"limit": 5})
+    # 第二次：同 path + params → 缓存命中
+    result2 = client._get("/players/123/matches", params={"limit": 5})
+    assert result1 == result2 == {"win": 10, "lose": 5}
+    assert session.calls == 1  # 只发了一次 HTTP
+
+
+def test_response_cache_expired_re_requests(monkeypatch) -> None:
+    """缓存过期后应重新请求上游。"""
+    import time
+    session = FakeSession([
+        FakeResponse(200, {"version": 1}),
+        FakeResponse(200, {"version": 2}),
+    ])
+    client = OpenDotaApiClient(
+        session=session, max_retries=0, cache_path=None,
+    )
+    # 第一次写入后把整个缓存清空，模拟 TTL 过期
+    client._get("/players/123/matches")
+    client._response_cache.clear()
+    client._get("/players/123/matches")
+    assert session.calls == 2
+
+
+def test_response_cache_ttl_by_endpoint_type() -> None:
+    """不同端点应有不同 TTL。"""
+    assert open_dota_client._resolve_cache_ttl("/explorer") is None  # 不缓存
+    assert open_dota_client._resolve_cache_ttl("/matches/123") == open_dota_client._MATCH_DETAIL_TTL
+    assert open_dota_client._resolve_cache_ttl("/players/123/matches") == open_dota_client._MATCH_TTL
+    assert open_dota_client._resolve_cache_ttl("/live") == open_dota_client._LIVE_TTL
+    assert open_dota_client._resolve_cache_ttl("/heroes/123/matchups") == open_dota_client._HERO_TTL
+    assert open_dota_client._resolve_cache_ttl("/teams/123/overview") == open_dota_client._TEAM_TTL
+    assert open_dota_client._resolve_cache_ttl("/leagues") == open_dota_client._GLOBAL_STATIC_TTL
+
+
+def test_explorer_is_never_cached(monkeypatch) -> None:
+    """explorer SQL 查询结果不可预测，不得缓存。"""
+    session = FakeSession([
+        FakeResponse(200, {"rows": [{"games": 1}]}),
+        FakeResponse(200, {"rows": [{"games": 2}]}),
+    ])
+    client = OpenDotaApiClient(
+        session=session, max_retries=0, cache_path=None,
+    )
+    result1 = client._get("/explorer", params={"sql": "SELECT 1"})
+    result2 = client._get("/explorer", params={"sql": "SELECT 1"})
+    assert session.calls == 2  # 两次都应打 HTTP
+    assert result1 == {"rows": [{"games": 1}]}
+    assert result2 == {"rows": [{"games": 2}]}
+
+
+def test_cache_key_is_stable_regardless_of_dict_order() -> None:
+    """params 字典顺序不应影响 cache_key（Python 3.7+ dict 有插入顺序）。"""
+    key_a = open_dota_client._make_cache_key("/players/1/matches", {"limit": 5, "date": 7})
+    key_b = open_dota_client._make_cache_key("/players/1/matches", {"date": 7, "limit": 5})
+    assert key_a == key_b
+    # 同 path 无 params
+    assert open_dota_client._make_cache_key("/live", None) == "/live"
+    assert open_dota_client._make_cache_key("/live", {}) == "/live"
+
+
+def test_response_cache_maxsize_evicts_oldest() -> None:
+    """超出 maxsize 时应淘汰最旧条目。"""
+    cache = open_dota_client._ResponseCache(maxsize=2)
+    cache.put("a", 1)
+    cache.put("b", 2)
+    cache.put("c", 3)
+    # "a" 应被淘汰
+    assert cache.get("a", ttl_seconds=60) is None
+    assert cache.get("b", ttl_seconds=60) == 2
+    assert cache.get("c", ttl_seconds=60) == 3
+
+
+def test_response_cache_clear() -> None:
+    cache = open_dota_client._ResponseCache(maxsize=10)
+    cache.put("x", 1)
+    cache.put("y", 2)
+    cache.clear()
+    assert cache.get("x", ttl_seconds=60) is None
+    assert cache.get("y", ttl_seconds=60) is None
+
+
+def test_cache_is_thread_safe() -> None:
+    """多线程并发 put/get 不应崩溃。"""
+    import threading
+    cache = open_dota_client._ResponseCache(maxsize=100)
+    errors: list[BaseException] = []
+
+    def worker(start: int) -> None:
+        try:
+            for i in range(100):
+                cache.put(f"key-{start}-{i}", i)
+                cache.get(f"key-{start}-{i}", ttl_seconds=60)
+        except BaseException as exc:
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker, args=(t,)) for t in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert errors == []

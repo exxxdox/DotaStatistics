@@ -121,6 +121,89 @@ class _CachePersistenceError(OpenDotaApiError):
     """英雄统计缓存无法安全持久化。"""
 
 
+class _ResponseCache:
+    """线程安全的带过期时间响应缓存。
+
+    独立的实现避免引入额外依赖；maxsize 限制缓存内存占用，
+    过期条目在读取时惰性清理，超上限时淘汰最旧条目。
+    """
+
+    def __init__(self, maxsize: int = 512) -> None:
+        self._store: dict[str, tuple[float, Any]] = {}
+        self._lock = threading.RLock()
+        self._maxsize = maxsize
+
+    def get(self, key: str, ttl_seconds: float) -> Any | None:
+        """命中返回值；已过期或不存在返回 None。"""
+        with self._lock:
+            entry = self._store.get(key)
+            if entry is None:
+                return None
+            timestamp, value = entry
+            if time.monotonic() - timestamp > ttl_seconds:
+                self._store.pop(key, None)
+                return None
+            return value
+
+    def put(self, key: str, value: Any) -> None:
+        """写入时如果超上限，按时间戳淘汰最旧条目。"""
+        with self._lock:
+            self._store[key] = (time.monotonic(), value)
+            if len(self._store) > self._maxsize:
+                # 按 timestamp 升序，淘汰最旧的一条。
+                oldest = min(self._store, key=lambda k: self._store[k][0])
+                self._store.pop(oldest, None)
+
+    def clear(self) -> None:
+        with self._lock:
+            self._store.clear()
+
+
+# 不同端点类型对应的缓存过期时间（秒）。
+_MATCH_TTL = 2 * 60          # 玩家比赛列表短缓存，匹配进行中会变
+_MATCH_DETAIL_TTL = 30 * 60  # 单场比赛结果永久不变，长缓存
+_PROFILE_TTL = 30 * 60       # 选手资料极少变
+_HERO_TTL = 30 * 60          # 英雄数据小时级更新
+_TEAM_TTL = 30 * 60          # 战队数据小时级更新
+_GLOBAL_STATIC_TTL = 60 * 60 # leagues/teams/pro_players 等静态数据
+_LIVE_TTL = 30               # 实时比赛秒级变化，短缓存
+
+
+def _resolve_cache_ttl(path: str) -> float | None:
+    """按请求路径返回 TTL；返回 None 表示不缓存（如 explorer SQL）。"""
+    if path.startswith("/explorer"):
+        return None
+    if path.startswith("/matches/") and path.count("/") == 2:
+        # /matches/{id} —— 单场详情
+        return _MATCH_DETAIL_TTL
+    if path.startswith("/players/"):
+        # 所有玩家相关查询（matches/profile/wl/heroes/peers/totals 等）
+        return _MATCH_TTL
+    if path.startswith("/heroes/") or path == "/rankings":
+        return _HERO_TTL
+    if path.startswith("/teams/"):
+        return _TEAM_TTL
+    # 全局端点按 view 细分
+    global_ttls = {
+        "/live": _LIVE_TTL,
+        "/proMatches": _MATCH_TTL,
+        "/publicMatches": _MATCH_TTL,
+    }
+    if path in global_ttls:
+        return global_ttls[path]
+    # teams、leagues、top_players、heroStats、proPlayers 等静态全局数据
+    return _GLOBAL_STATIC_TTL
+
+
+def _make_cache_key(path: str, params: dict[str, Any] | None) -> str:
+    """稳定地生成缓存键；params 为 None 时只看 path。"""
+    if not params:
+        return path
+    # 排序后拼接，避免不同 dict 插入顺序造成同一个查询多个键。
+    serialized = "&".join(f"{k}={v}" for k, v in sorted(params.items()))
+    return f"{path}?{serialized}"
+
+
 @dataclass(frozen=True)
 class HeroWinRateStat:
     hero_id: int
@@ -167,6 +250,8 @@ class OpenDotaApiClient:
         self._sleep = sleep
         self._now = now
         self._cache_lock = threading.Lock()
+        # 响应缓存：避免同一会话内重复打外部 API，TTL 按端点类型区分。
+        self._response_cache = _ResponseCache(maxsize=int(os.environ.get("OPENDOTA_CACHE_MAXSIZE", "512")))
         self.used_cached_hero_stats = False
         self.stats_period_start: date | None = None
         self.stats_period_end: date | None = None
@@ -832,6 +917,16 @@ GROUP BY hero_id
     ) -> Any:
         request_timeout = self.timeout if timeout is None else timeout
         retry_count = self.max_retries if max_retries is None else max_retries
+
+        # 查询响应缓存：命中则跳过 HTTP，TTL 由端点类型决定。
+        ttl = _resolve_cache_ttl(path)
+        if ttl is not None:
+            cache_key = _make_cache_key(path, params)
+            cached = self._response_cache.get(cache_key, ttl)
+            if cached is not None:
+                _log.debug("OpenDota 响应缓存命中: path=%s", path)
+                return cached
+
         for attempt in range(retry_count + 1):
             response = None
             try:
@@ -844,7 +939,12 @@ GROUP BY hero_id
                     **self._proxy_options,
                 )
                 response.raise_for_status()
-                return self._read_response_json(response)
+                result = self._read_response_json(response)
+                # 成功响应写入缓存；explorer / 实时数据不缓存已由 ttl 控制。
+                if ttl is not None:
+                    cache_key = _make_cache_key(path, params)
+                    self._response_cache.put(cache_key, result)
+                return result
             except requests.RequestException as error:
                 status_code = getattr(error.response, "status_code", None)
                 retryable = (

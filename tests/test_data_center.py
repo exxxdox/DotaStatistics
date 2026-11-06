@@ -46,3 +46,19 @@ def test_command_workers_rejects_invalid_configuration(monkeypatch, configured) 
     monkeypatch.setenv("DOTA_COMMAND_WORKERS", configured)
     with pytest.raises(ValueError, match="DOTA_COMMAND_WORKERS"):
         data_center._resolve_command_workers()
+
+
+@pytest.mark.parametrize("configured, expected", [(None, 2), ("1", 1), (" 4 ", 4), ("16", 16)])
+def test_ai_workers_configuration(monkeypatch, configured, expected) -> None:
+    if configured is None:
+        monkeypatch.delenv("DOTA_AI_WORKERS", raising=False)
+    else:
+        monkeypatch.setenv("DOTA_AI_WORKERS", configured)
+    assert data_center._resolve_ai_workers() == expected
+
+
+@pytest.mark.parametrize("configured", ["", "0", "-1", "17", "1.5"])
+def test_ai_workers_rejects_invalid_configuration(monkeypatch, configured) -> None:
+    monkeypatch.setenv("DOTA_AI_WORKERS", configured)
+    with pytest.raises(ValueError, match="DOTA_AI_WORKERS"):
+        data_center._resolve_ai_workers()

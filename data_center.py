@@ -40,6 +40,17 @@ def _resolve_command_workers() -> int:
     return workers
 
 
+def _resolve_ai_workers() -> int:
+    """AI 线程池大小，与命令线程池隔离，避免慢 AI 饿死确定性命令。"""
+    try:
+        workers = int(os.environ.get("DOTA_AI_WORKERS", "2"))
+    except ValueError as error:
+        raise ValueError("DOTA_AI_WORKERS 必须是 1 至 16 的整数") from error
+    if not 1 <= workers <= 16:
+        raise ValueError("DOTA_AI_WORKERS 必须是 1 至 16 的整数")
+    return workers
+
+
 data_dir = _resolve_data_dir()
 hero_names_path = resource_dir / "hero_name.json"
 common_id_path = data_dir / "name_id.json"
@@ -48,4 +59,5 @@ hero_stats_cache_path = data_dir / "daily_hero_stats_cache.json"
 conversation_memory_dir = data_dir / "conversations"
 operator_ids = _resolve_operator_ids()
 command_workers = _resolve_command_workers()
+ai_workers = _resolve_ai_workers()
 enable_ai = True
