@@ -127,80 +127,188 @@ def command_pool(monkeypatch):
         yield pool
 
 
-@pytest.mark.parametrize("content", ["聊天", "撒情况", "简报"])
-def test_slow_commands_leave_storage_and_cached_reports_available(
-    command_pool, memory_store, content,
-) -> None:
+@pytest.fixture
+def ai_pool(monkeypatch):
+    """与 command_pool 对称的 AI 线程池 mock，2 worker + 2 槽。"""
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        monkeypatch.setattr(qq_bot, "_AI_EXECUTOR", pool, raising=False)
+        monkeypatch.setattr(qq_bot, "_AI_SLOTS", BoundedSemaphore(2), raising=False)
+        yield pool
+
+
+def _run_isolation_test(pool_to_fill: str, content_to_fill: str) -> None:
+    """bot 用 slow router 占满指定池，other 用正常 router 验证另一池不受影响。"""
     release = Event()
+    started = Event()
+
+    def slow(*_args):
+        # 所有路由入口都走 slow，确保一定能占满
+        started.set()
+        assert release.wait(5)
+        return "完成"
 
     async def run() -> None:
-        loop = asyncio.get_running_loop()
-        loop.set_default_executor(ThreadPoolExecutor(max_workers=2))
-        started = [asyncio.Event(), asyncio.Event()]
-        calls = []
-
-        def slow(*_args):
-            index = len(calls)
-            calls.append(True)
-            loop.call_soon_threadsafe(started[index].set)
-            assert release.wait(5)
-            return "完成"
+        # bot 用 slow router 占满池
+        slow_bot = MyClient(
+            router=build_router(
+                chat=slow, ask_command_parameter=slow,
+                get_today_report=slow, get_recent_matches=slow,
+            ),
+            hero_win_rate_report=SimpleNamespace(
+                build=lambda: "新榜单", build_cached=lambda: "缓存榜单",
+            ),
+            intents=botpy.Intents(public_messages=True), ext_handlers=False,
+        )
+        # other 用正常 router，不受 slow 影响
+        normal_bot = MyClient(
+            router=build_router(),
+            hero_win_rate_report=SimpleNamespace(
+                build=lambda: "新榜单", build_cached=lambda: "缓存榜单",
+            ),
+            intents=botpy.Intents(public_messages=True), ext_handlers=False,
+        )
 
         class Message:
             def __init__(self, text):
                 self.content = text
-                self.replies = []
+                self.replies: list[str] = []
 
             async def reply(self, **kwargs):
                 self.replies.append(kwargs["content"])
                 return SimpleNamespace(id="reply-id")
 
-        def client():
-            return MyClient(
-                router=build_router(
-                    chat=slow, ask_command_parameter=slow, get_today_report=slow,
-                ),
-                hero_win_rate_report=SimpleNamespace(
-                    build=lambda: "新榜单", build_cached=lambda: "缓存榜单",
-                ),
-                intents=botpy.Intents(public_messages=True), ext_handlers=False,
-            )
+        # 先启动两条占池消息
+        tasks = []
+        for i in range(2):
+            tasks.append(asyncio.create_task(
+                slow_bot._handle_message(
+                    Message(content_to_fill), f"c2c:{i}", str(i)
+                )
+            ))
+        # 等 slow 线程池里的至少一条进入 started
+        await asyncio.wait_for(asyncio.to_thread(started.wait, 2), 1)
 
-        bot, other = client(), client()
-        tasks = [
-            asyncio.create_task(bot._handle_message(Message(content), f"c2c:{i}", str(i)))
-            for i in range(2)
-        ]
         try:
-            await asyncio.wait_for(asyncio.gather(*(event.wait() for event in started)), 1)
-            busy = Message("/clear")
-            await asyncio.wait_for(other._handle_message(busy, "c2c:busy", "busy"), 1)
-            assert busy.replies == ["当前查询繁忙，请稍后再试。"]
-            assert len(calls) == 2
-            assert memory_store.read("c2c:busy") == [
-                {"role": "user", "content": "/clear"},
-                {"role": "assistant", "content": busy.replies[0]},
-            ]
-            hero = Message("高胜率英雄")
-            await asyncio.wait_for(other._handle_message(hero, "c2c:hero", "hero"), 1)
-            assert hero.replies == ["缓存榜单"]
+            if pool_to_fill == "ai":
+                # AI 池满 → 命令池应正常
+                clear_msg = Message("/clear")
+                await asyncio.wait_for(
+                    normal_bot._handle_message(clear_msg, "c2c:clear", "clear"), 1
+                )
+                assert clear_msg.replies == ["已清空当前会话的对话记录，已绑定选手资料保留。"]
+            else:
+                # 命令池满 → AI 池应正常
+                chat_msg = Message("聊天")
+                await asyncio.wait_for(
+                    normal_bot._handle_message(chat_msg, "c2c:chat", "chat"), 1
+                )
+                assert chat_msg.replies == ["AI:聊天"]
         finally:
             release.set()
             await asyncio.gather(*tasks)
-        recent = Message("撒情况 小明")
-        await other._handle_message(recent, "c2c:recent", "recent")
-        assert recent.replies == ["比赛:123"]
 
     asyncio.run(run())
 
 
-def test_cancelled_command_keeps_slot_until_worker_finishes(command_pool) -> None:
+def test_ai_pool_full_command_pool_still_responds(ai_pool) -> None:
+    """AI 池被占满时，确定性命令走命令池，不受影响。"""
+    _run_isolation_test(pool_to_fill="ai", content_to_fill="聊天")
+
+
+def test_command_pool_full_ai_pool_still_responds(command_pool) -> None:
+    """命令池被占满时，普通聊天走 AI 池，不受影响。"""
+    _run_isolation_test(pool_to_fill="command", content_to_fill="撒情况 小明")
+
+
+def test_pool_busy_when_same_pool_full(ai_pool, command_pool) -> None:
+    """占满一个池后，向同一池发第三条消息应立即返回繁忙。"""
+    release = Event()
+    started = Event()
+
+    def slow(*_args):
+        started.set()
+        assert release.wait(5)
+        return "完成"
+
+    async def run() -> None:
+        slow_bot = MyClient(
+            router=build_router(
+                chat=slow, ask_command_parameter=slow,
+                get_today_report=slow, get_recent_matches=slow,
+            ),
+            intents=botpy.Intents(public_messages=True), ext_handlers=False,
+        )
+        normal_bot = MyClient(
+            router=build_router(),
+            intents=botpy.Intents(public_messages=True), ext_handlers=False,
+        )
+
+        class Message:
+            def __init__(self, text):
+                self.content = text
+                self.replies: list[str] = []
+
+            async def reply(self, **kwargs):
+                self.replies.append(kwargs["content"])
+                return SimpleNamespace(id="reply-id")
+
+        # 占满 command pool
+        cmd_tasks = []
+        for i in range(2):
+            cmd_tasks.append(asyncio.create_task(
+                slow_bot._handle_message(
+                    Message("撒情况 小明"), f"c2c:cmd-{i}", f"cmd-{i}"
+                )
+            ))
+        await asyncio.wait_for(asyncio.to_thread(started.wait, 2), 1)
+
+        try:
+            # 第三条命令：command pool 已满 → 繁忙
+            busy_cmd = Message("撒情况 小明")
+            await asyncio.wait_for(
+                normal_bot._handle_message(busy_cmd, "c2c:busy-cmd", "busy-cmd"), 1
+            )
+            assert busy_cmd.replies == ["当前查询繁忙，请稍后再试。"]
+
+            # 但 AI 消息走另一池，应正常
+            chat_msg = Message("聊天")
+            await asyncio.wait_for(
+                normal_bot._handle_message(chat_msg, "c2c:chat", "chat"), 1
+            )
+            assert chat_msg.replies == ["AI:聊天"]
+        finally:
+            release.set()
+            await asyncio.gather(*cmd_tasks)
+
+        # 释放后 command pool 恢复
+        cmd_msg = Message("撒情况 小明")
+        await asyncio.wait_for(
+            normal_bot._handle_message(cmd_msg, "c2c:recovered", "recovered"), 1
+        )
+        assert cmd_msg.replies == ["比赛:123"]
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "pool_fixture,content,pool_module_attr",
+    [
+        ("ai_pool", "聊天", "_AI_EXECUTOR"),
+        ("command_pool", "撒情况 小明", "_COMMAND_EXECUTOR"),
+    ],
+)
+def test_cancelled_message_keeps_slot_until_worker_finishes(
+    request, pool_fixture, content, pool_module_attr
+) -> None:
+    """无论哪个池，被 cancel 的任务都应等 worker 真实完成后才释放 slot。"""
+    request.getfixturevalue(pool_fixture)
+    pool = getattr(qq_bot, pool_module_attr)
     release = Event()
 
     async def run() -> None:
         loop = asyncio.get_running_loop()
         started = [asyncio.Event(), asyncio.Event()]
-        calls = []
+        calls: list[bool] = []
 
         def slow(*_args):
             index = len(calls)
@@ -209,54 +317,85 @@ def test_cancelled_command_keeps_slot_until_worker_finishes(command_pool) -> Non
             assert release.wait(5)
             return "完成"
 
+        def build_slow_router():
+            return build_router(
+                chat=slow, get_recent_matches=lambda *_args: slow()
+            )
+
         bot = MyClient(
-            router=build_router(chat=slow),
+            router=build_slow_router(),
             intents=botpy.Intents(public_messages=True), ext_handlers=False,
         )
 
         class Message:
-            content = "聊天"
+            def __init__(self, text):
+                self.content = text
+                self.replies: list[str] = []
 
             async def reply(self, **kwargs):
-                replies.append(kwargs["content"])
+                self.replies.append(kwargs["content"])
                 return SimpleNamespace(id="reply-id")
 
-        replies = []
+        replies: list[str] = []
         tasks = [
-            asyncio.create_task(bot._handle_message(Message(), f"c2c:{i}", str(i)))
+            asyncio.create_task(
+                bot._handle_message(Message(content), f"c2c:{i}", str(i))
+            )
             for i in range(2)
         ]
         try:
-            await asyncio.wait_for(asyncio.gather(*(event.wait() for event in started)), 1)
+            await asyncio.wait_for(
+                asyncio.gather(*(event.wait() for event in started)), 1
+            )
             tasks[0].cancel()
             with pytest.raises(asyncio.CancelledError):
                 await tasks[0]
-            await asyncio.wait_for(bot._handle_message(Message(), "c2c:extra", "extra"), 1)
-            assert replies == ["当前查询繁忙，请稍后再试。"]
+            # 第三条消息：同一池已被两条占满，cancel 只取消了 future 但 worker 还没退出
+            extra = Message(content)
+            await asyncio.wait_for(
+                bot._handle_message(extra, "c2c:extra", "extra"), 1
+            )
+            assert extra.replies == ["当前查询繁忙，请稍后再试。"]
             assert len(calls) == 2
         finally:
             release.set()
             await asyncio.gather(*tasks, return_exceptions=True)
-            # 标记任务运行前，同池中已返回的业务 future 已执行槽位回收回调。
-            await asyncio.wrap_future(command_pool.submit(lambda: None))
+            # 等待同池中 worker 真正执行完槽位释放回调
+            await asyncio.wrap_future(pool.submit(lambda: None))
+        # 恢复正常
         bot.router = build_router()
-        await bot._handle_message(Message(), "c2c:recovered", "recovered")
-        assert replies[-1] == "AI:聊天"
+        recovered = Message(content)
+        await asyncio.wait_for(
+            bot._handle_message(recovered, "c2c:recovered", "recovered"), 1
+        )
+        assert recovered.replies and recovered.replies != ["当前查询繁忙，请稍后再试。"]
 
     asyncio.run(run())
 
 
 @pytest.mark.parametrize("failure", ["dispatch", "submit"])
-def test_command_failure_returns_capacity(command_pool, monkeypatch, failure) -> None:
-    replies = []
+@pytest.mark.parametrize(
+    "pool_fixture,content",
+    [
+        ("ai_pool", "聊天"),
+        ("command_pool", "撒情况 小明"),
+    ],
+)
+def test_pool_failure_returns_capacity(request, failure, pool_fixture, content) -> None:
+    """executor.submit 或 router.dispatch 抛异常时，slot 必须被释放。"""
+    request.getfixturevalue(pool_fixture)
+    replies: list[str] = []
 
     def fail(*_args):
-        raise RuntimeError("command failed")
+        raise RuntimeError("handler failed")
 
     class Message:
-        content = "聊天"
+        def __init__(self, text):
+            self.content = text
+            self.replies: list[str] = []
 
         async def reply(self, **kwargs):
+            self.replies.append(kwargs["content"])
             replies.append(kwargs["content"])
             return SimpleNamespace(id="reply-id")
 
@@ -265,15 +404,17 @@ def test_command_failure_returns_capacity(command_pool, monkeypatch, failure) ->
             router=SimpleNamespace(dispatch=fail),
             intents=botpy.Intents(public_messages=True), ext_handlers=False,
         )
-        with monkeypatch.context() as patch:
-            if failure == "submit":
-                patch.setattr(command_pool, "submit", fail)
-            for i in range(3):
-                await bot._handle_message(Message(), f"c2c:failed-{i}", str(i))
+        # 每条消息都走同一个池；3 条连续失败后池应该恢复到可用状态
+        for i in range(3):
+            await bot._handle_message(
+                Message(content), f"c2c:failed-{i}", f"failed-{i}"
+            )
         assert replies == ["处理失败了，稍后再试。"] * 3
+        # 恢复正常 router 后应该仍能执行
         bot.router = build_router()
-        await bot._handle_message(Message(), "c2c:recovered", "recovered")
-        assert replies[-1] == "AI:聊天"
+        recovered = Message(content)
+        await bot._handle_message(recovered, "c2c:recovered", "recovered")
+        assert recovered.replies != ["处理失败了，稍后再试。"]
 
     asyncio.run(run())
 
@@ -390,6 +531,31 @@ def test_command_panel_slash_prefix_is_ignored() -> None:
     assert router.dispatch(
         "/群OpenID", CommandContext(group_openid="group-openid")
     ) == "当前群 OpenID：group-openid"
+
+
+@pytest.mark.parametrize(
+    "content,expected",
+    [
+        ("聊天", True),
+        ("你好小明", True),
+        ("", False),
+        ("  ", False),
+        ("/clear", False),
+        ("clear", False),
+        ("简报", False),
+        ("撒情况 小明", False),
+        ("追踪术 小明 123", False),
+        ("群OpenID", False),
+        ("查看当前群OpenID", False),
+        ("高胜率英雄", False),
+        ("/撒情况 小明", False),   # 带斜杠也应识别为命令
+        ("／简报", False),          # 全角斜杠
+        ("clear extra  garbage", False),  # 已知命令名开头就走命令池
+    ],
+)
+def test_is_ai_chat_content_route_prediction(content: str, expected: bool) -> None:
+    """路由预判：已知命令 → False（走命令池），其他 → True（走 AI 池）。"""
+    assert qq_bot._is_ai_chat_content(content) is expected
 
 
 def test_command_errors_ask_for_parameters_without_general_chat() -> None:

@@ -12,7 +12,7 @@ from weakref import WeakValueDictionary
 import botpy
 from botpy.message import C2CMessage, GroupMessage
 
-from data_center import _log, command_workers
+from data_center import _log, ai_workers, command_workers
 from lib.conversation_memory import ConversationMemory
 from lib.qq_sdk_security import configure_qq_sdk_security
 # 保留旧模块的公开导入路径，避免部署扩展和已有调用方随职责拆分失效。
@@ -24,16 +24,56 @@ from service.command_router import (
     CommandRouter,
     normalize_command_content,
 )
-from service.commands import CLEAR_COMMAND, HERO_COMMAND
+from service.commands import (
+    CLEAR_COMMAND,
+    GROUP_OPENID_COMMAND,
+    HERO_COMMAND,
+    RECENT_COMMAND,
+    REPORT_COMMAND,
+    TRACK_COMMAND,
+)
 from service.hero_win_rate_report import HeroWinRateReportService
 from service.qq_command_discovery import QQCommandDiscoveryService
 
 PRIVATE_HERO_REPORT_COMMAND = HERO_COMMAND.name
 HERO_REPORT_REPLY_TIMEOUT_SECONDS = 20.0
 HERO_REPORT_CACHE_SECONDS = 300.0
-# 网络业务与存储隔离；进程共享准入，避免重建客户端绕过上限或累积线程。
+# 命令线程池：只执行确定性业务（help/clear/track/撒情况/参数追问等）。
+# AI 调用（deepseek_general / deepseek_command_question）已下沉到独立线程池，
+# 避免慢 AI + tool chain 饿死快速命令的回复。
 _COMMAND_EXECUTOR = ThreadPoolExecutor(max_workers=command_workers, thread_name_prefix="qq-command")
 _COMMAND_SLOTS = BoundedSemaphore(command_workers)
+# AI 线程池：专门承载 deepseek_general、deepseek_command_question 及其中的 tool 调用。
+_AI_EXECUTOR = ThreadPoolExecutor(max_workers=ai_workers, thread_name_prefix="qq-ai")
+_AI_SLOTS = BoundedSemaphore(ai_workers)
+
+# 所有确定性命令名（含别名）；不匹配任何命令名的消息走 AI 路由。
+_COMMAND_NAMES: set[str] = {CLEAR_COMMAND.name}
+for _cmd in (TRACK_COMMAND, RECENT_COMMAND, REPORT_COMMAND, GROUP_OPENID_COMMAND, HERO_COMMAND):
+    _COMMAND_NAMES.add(_cmd.name)
+    if _cmd.group_alias:
+        _COMMAND_NAMES.add(_cmd.group_alias.casefold())
+
+
+def _is_ai_chat_content(content: str) -> bool:
+    """快速判断消息是否应走 AI 线程池。
+
+    判断依据很简单：不以已知命令名开头 → 走 AI（可能是聊天或未知命令）。
+    已知命令名开头 → 走命令线程池（确定性执行，不触发 deepseek）。
+    """
+    normalized = normalize_command_content(content)
+    words = normalized.split()
+    if not words:
+        # 空消息走 /help，确定性
+        return False
+    first_word = words[0]
+    if first_word in _COMMAND_NAMES:
+        return False
+    # group_alias 使用 casefold 匹配
+    if first_word.casefold() in _COMMAND_NAMES:
+        return False
+    # 不在已知命令里 → AI 兜底（要么是普通聊天，要么是用户打错了命令）
+    return True
 
 
 class MyClient(botpy.Client):
@@ -153,19 +193,30 @@ class MyClient(botpy.Client):
                     history_before_id=record_id,
                     speaker_id=speaker_id,
                 )
-                # 提交前快速拒绝，不让慢 AI、参数追问或简报占满存储线程或排队。
-                if not _COMMAND_SLOTS.acquire(blocking=False):
+                # 预判路由：AI 聊天走独立线程池，避免慢 deepseek + tool chain
+                # 饿死 help/clear/track 等确定性命令的快速回复。
+                if _is_ai_chat_content(normalized_content):
+                    executor = _AI_EXECUTOR
+                    slots = _AI_SLOTS
+                    pool_label = "ai"
+                else:
+                    executor = _COMMAND_EXECUTOR
+                    slots = _COMMAND_SLOTS
+                    pool_label = "command"
+                # 提交前快速拒绝，不让慢 AI 或参数追问占满存储线程或排队。
+                if not slots.acquire(blocking=False):
                     reply = "当前查询繁忙，请稍后再试。"
                 else:
                     try:
-                        future = _COMMAND_EXECUTOR.submit(
+                        future = executor.submit(
                             copy_context().run, self.router.dispatch, message.content, context
                         )
                     except BaseException:
-                        _COMMAND_SLOTS.release()
+                        slots.release()
                         raise
                     # 取消等待不能停止运行中的线程，必须等真实工作完成才回收容量。
-                    future.add_done_callback(lambda _future: _COMMAND_SLOTS.release())
+                    future.add_done_callback(lambda _future: slots.release())
+                    _log.debug("提交到 %s 线程池: message=%s", pool_label, message.content[:40])
                     reply = await asyncio.wrap_future(future)
                     # 只有实际执行清空时才不记确认；繁忙提示仍正常落盘。
                     if normalized_content == CLEAR_COMMAND.name:
