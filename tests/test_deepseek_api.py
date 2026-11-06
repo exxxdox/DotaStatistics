@@ -359,23 +359,34 @@ def test_permanent_players_survive_history_window_and_use_latest_ids(
         "已记录哪些选手？", "c2c:user-a", player_bindings=players.bindings
     )
     messages = client.chat.completions.create.call_args.kwargs["messages"]
-    assert json.loads(messages[1]["content"]) == {"tracked_players": {"小明": 123}}
+    # tracked_players 现在在 system prompt 的 DATA BLOCK 里，而不是 user message。
+    assert messages[0]["role"] == "system"
+    assert "<tracked_players>" in messages[0]["content"]
+    assert json.loads(
+        messages[0]["content"].split("<tracked_players>")[1].split("</tracked_players>")[0]
+    ) == {"小明": 123}
     assert all("旧聊天绑定" not in message["content"] for message in messages)
-    assert "小明" not in messages[0]["content"]
+    # system prompt 本身不应该包含选手昵称（昵称只是数据）。
+    assert "小明" not in messages[0]["content"].split("<tracked_players>")[0]
 
     players.set("小明", 789)
     deepseek_api.deepseek_general(
         "最新ID是什么？", "c2c:user-a", player_bindings=players.bindings
     )
     messages = client.chat.completions.create.call_args.kwargs["messages"]
-    assert json.loads(messages[1]["content"]) == {"tracked_players": {"小明": 789}}
+    assert json.loads(
+        messages[0]["content"].split("<tracked_players>")[1].split("</tracked_players>")[0]
+    ) == {"小明": 789}
 
     restarted = PlayerRepository(players.file_path)
     deepseek_api.deepseek_command_question(
         "撒情况", "昵称", "", player_bindings=restarted.bindings
     )
-    data = client.chat.completions.create.call_args.kwargs["messages"][1]["content"]
-    assert json.loads(data)["tracked_players"] == {"小明": 789}
+    cmd_messages = client.chat.completions.create.call_args.kwargs["messages"]
+    assert cmd_messages[0]["role"] == "system"
+    assert json.loads(
+        cmd_messages[0]["content"].split("<tracked_players>")[1].split("</tracked_players>")[0]
+    ) == {"小明": 789}
 
 
 def test_general_chat_reads_injected_store_instead_of_global(monkeypatch, tmp_path) -> None:

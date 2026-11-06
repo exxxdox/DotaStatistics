@@ -15,6 +15,7 @@ from botpy.message import C2CMessage, GroupMessage
 from data_center import _log, ai_workers, command_workers
 from lib.conversation_memory import ConversationMemory
 from lib.qq_sdk_security import configure_qq_sdk_security
+from lib.utils import split_for_qq
 # 保留旧模块的公开导入路径，避免部署扩展和已有调用方随职责拆分失效。
 from bootstrap import build_application
 from service.command_router import (
@@ -236,9 +237,24 @@ class MyClient(botpy.Client):
             await message.reply(msg_type=0, content="对话记录存储失败，请稍后再试。")
             return
 
-        result = await message.reply(msg_type=0, content=reply)
+        # 分段发送：QQ 单条消息有长度上限；AI 分析回复可能超限。
+        segments = split_for_qq(reply)
+        first_result = None
+        for index, segment in enumerate(segments):
+            try:
+                msg = await message.reply(msg_type=0, content=segment)
+                if index == 0:
+                    first_result = msg
+            except Exception:
+                _log.exception("QQ 分段回复失败 (第 %d/%d 段)", index + 1, len(segments))
+                break
+
         # 只记消息 ID，用户标识和对话正文不进入普通运行日志。
-        _log.info(f"消息回复成功: message_id={getattr(result, 'id', None)}")
+        if first_result is not None:
+            _log.info(
+                "消息回复成功: message_id=%s segments=%d",
+                getattr(first_result, "id", None), len(segments),
+            )
 
     async def _refresh_hero_reports(self) -> None:
         # 启动即预热，定期检查可在跨 UTC 日后补齐，并让失败查询冷却后重试。

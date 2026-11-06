@@ -346,25 +346,39 @@ class ConversationMemory:
         self,
         conversation_id: str,
         # 缩小每次模型请求携带的历史，降低重复输入的 token 消耗。
-        max_chars: int = 8_000,
+        max_chars: int = 12_000,
         max_messages: int = 20,
         *,
         before_id: int | None = None,
-    ) -> list[dict[str, str]]:
+        return_meta: bool = False,
+    ) -> list[dict[str, str]] | tuple[list[dict[str, str]], bool]:
+        """读取最近的对话历史，按时间正序返回。
+
+        return_meta=True 时返回 (records, was_truncated)，告知调用方历史是否被窗口截断
+        （便于在 AI 对话中注入提示，避免模型对缺失的早期上下文产生幻觉）。
+        默认返回类型保持 list 不变，向后兼容。
+        """
         with _STORAGE_LOCK:
             path, limit = self._location(conversation_id)
             if max_chars < 0 or max_messages < 0:
                 raise ValueError("Context limits must be nonnegative")
             if not path.exists() or not max_chars or not max_messages:
-                return []
+                return ([], False) if return_meta else []
             messages: list[dict[str, str]] = []
+            chars_budget = max_chars
+            was_truncated = False
             with closing(self._connect(path, limit)) as connection:
+                # 多取一条探测是否有更多记录（比直接靠 SQL LIMIT 更准确）。
                 cursor = connection.execute(
                     "SELECT payload FROM messages WHERE (? IS NULL OR id < ?) "
                     "ORDER BY id DESC LIMIT ?",
-                    (before_id, before_id, max_messages),
+                    (before_id, before_id, max_messages + 1),
                 )
                 for (payload,) in cursor:
+                    if len(messages) >= max_messages:
+                        # 已取够 max_messages 还有剩余 → 明确截断。
+                        was_truncated = True
+                        break
                     try:
                         message = json.loads(zlib.decompress(payload).decode("utf-8"))
                         role, content = message["role"], message["content"]
@@ -373,12 +387,17 @@ class ConversationMemory:
                     except (zlib.error, UnicodeError, ValueError, KeyError, TypeError) as error:
                         raise ValueError("Corrupt compressed conversation history") from error
                     # Keep the latest text when a single reply exceeds the model's context budget.
-                    content = content[-max_chars:]
+                    if len(content) > chars_budget:
+                        content = content[-chars_budget:]
+                        was_truncated = True
                     messages.append({"role": role, "content": content})
-                    max_chars -= len(content)
-                    if not max_chars:
+                    chars_budget -= len(content)
+                    if chars_budget <= 0:
+                        was_truncated = True
                         break
             messages.reverse()
+            if return_meta:
+                return messages, was_truncated
             return messages
 
 
